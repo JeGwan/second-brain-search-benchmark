@@ -30,7 +30,10 @@ engines/
 ```bash
 cp -r engines/no-engine engines/agy-gemini-3.5-pro-medium
 # 해당 agent-model 로 평가를 구동 (답변 서브에이전트가 그 모델이어야 함)
-python3 evaluator.py --engine agy-gemini-3.5-pro-medium --interactive-agent
+python3 evaluator.py prepare --engine agy-gemini-3.5-pro-medium --answer-source "Gemini 3.5 Pro (medium)"
+#   → (에이전트) 격리 답변/채점 서브에이전트 수행
+python3 evaluator.py grade-prompts --engine agy-gemini-3.5-pro-medium
+python3 evaluator.py assemble --engine agy-gemini-3.5-pro-medium
 ```
 > 명명 규약(권장): `<agent>-<model>-<effort>` 형태로 답변 모델을 명확히 식별
 > (예: `agy-gemini-3.5-pro-medium`, `cc-opus-4.8`, `codex-gpt-...`).

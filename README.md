@@ -33,33 +33,32 @@ SBSE-Bench는 **엔진-agnostic** 합니다. 평가는 `engines/<엔진이름>/s
 
 ---
 
-### 3) 에이전트별 구동 방법 (Running the Benchmark)
-아래에서 `<engine>` 은 당신이 작성한 어댑터 폴더 이름입니다.
+### 3) 구동 방법 (Running the Benchmark)
+가장 쉬운 방법은 에이전트에게 `/sbse-bench <engine>` (또는 "sbse-bench 스킬로 `<engine>`
+벤치마크 수행해줘")이라고 요청하는 것입니다. 그러면 에이전트가 `SKILL.md` 가이드에 따라
+아래 5단계 파이프라인을 대신 수행합니다. 평가기는 결정론적인 일만 하고, **답변/채점은
+에이전트가 격리 서브에이전트를 띄워** 처리합니다. (Antigravity·Claude Code·Codex 공통)
 
-#### 🔹 Antigravity (Gemini-based Agent)
-Antigravity CLI는 파일 구조 기반의 커스텀 **스킬(Skills)** 시스템을 기본 지원합니다.
-*   **스킬 호출**: 채팅창에 `/sbse-bench <engine>` 입력. (또는 "sbse-bench 스킬로 `<engine>` 벤치마크 수행해줘")
+```bash
+# 1) 검색 실행 + 프롬프트 생성 → engines/<engine>/run.json
+python3 evaluator.py prepare --engine <engine> --stability-runs 2 --answer-source "<답변 모델명>"
 
-#### 🔹 Claude Code (Anthropic CLI Agent)
-*   **구동 방법**: Claude Code 프롬프트에 직접 아래 가이드와 명령어를 입력합니다.
-    > "아래 명령어로 평가기를 구동하고, `=== SUBAGENT_PROMPT_START ===` 마커와 함께 질문이 제공되면 다른 문서를 직접 열지 말고(격리), 마커 사이 텍스트만 참고하여 답변해줘."
+# 2) (에이전트) run.json 의 각 항목 answer_prompt 로 격리 답변 서브에이전트를 띄워 answer 채움
 
-    ```bash
-    python3 evaluator.py --engine <engine> --interactive-agent
-    # 보고서는 engines/<engine>/report.md 로 생성됩니다 (--output 으로 변경 가능).
-    ```
+# 3) 답변을 받아 컨텍스트 포함 채점 프롬프트 생성
+python3 evaluator.py grade-prompts --engine <engine>
 
-#### 🔹 Codex (OpenAI Developer Agent Framework)
-*   **구동 방법**: Codex가 원본 문서를 직접 읽는 치팅을 쓰지 않도록 실행 프롬프트를 지정하여 구동합니다.
-    > "아래 명령어를 실행하고, `=== SUBAGENT_PROMPT` 마커가 감지되면 출력된 마커 사이 텍스트 범위 내에서만 100% 무맥락 격리 상태로 답변을 작성해 stdin으로 입력해줘."
+# 4) (에이전트) 각 항목 grade_prompt 로 격리 채점 서브에이전트를 띄워 score/reason 채움
 
-    ```bash
-    python3 evaluator.py --engine <engine> --interactive-agent
-    # 보고서는 engines/<engine>/report.md 로 생성됩니다 (--output 으로 변경 가능).
-    ```
+# 5) 집계 → engines/<engine>/report.md + report.results.json
+python3 evaluator.py assemble --engine <engine>
+```
 
-> LLM 비용 없이 채점 결과로 보고서만 다시 만들려면:
-> `python3 evaluator.py --from-results engines/<engine>/report.results.json`
+> 이전의 stdin 중계·마커(`=== SUBAGENT_PROMPT ===`) 기반 대화형 프로토콜은 **폐기**되었습니다.
+> 이제 평가기와 에이전트는 단일 작업 파일 `run.json` 으로 핸드오프합니다.
+>
+> LLM 없이 채점 결과로 보고서만 다시 만들려면:
+> `python3 evaluator.py render engines/<engine>/report.results.json`
 
 ---
 
@@ -109,20 +108,22 @@ graph TD
 
 ## 4. 에이전트 격리 실행 원리 (How it Works)
 
-에이전트는 벤치마크 실행 시 아래와 같이 철저히 통제된 샌드박스 루프를 돌며 답변과 채점을 수행합니다.
+평가기(`evaluator.py`)는 **결정론적인 일만** 합니다(검색 실행·프롬프트 생성·재현율 계산·집계).
+**답변/채점처럼 에이전트가 필요한 일은 오케스트레이터 에이전트가 격리 서브에이전트를 띄워**
+수행하고, 둘은 단일 작업 파일 `engines/<engine>/run.json` 으로 주고받습니다. (stdin 중계·마커 없음)
 
 1.  **무맥락/격리 (No Context & Isolation)**:
-    *   평가기(`evaluator.py`)가 검색 엔진의 `search.py`를 실행하여 검색 결과만 추출합니다.
-    *   에이전트는 질문과 검색된 텍스트조각(Context) 정보만 담아 **독립된 `self` 서브에이전트**를 띄웁니다.
-    *   서브에이전트는 이 대화가 벤치마크의 일부라는 정보나 전체 원본 마크다운 파일들의 위치를 모른 채 오로지 주어진 텍스트 내용에 기반해서만 답변을 작성하여 제출합니다 (LLM의 치팅 및 정보 추가 획득 원천 차단).
+    *   `prepare` 가 `search.py`를 실행해 컨텍스트를 추출하고 항목별 답변 프롬프트를 만듭니다.
+    *   에이전트는 **항목마다 독립된 서브에이전트**를 띄워 그 항목의 `answer_prompt`(질문+컨텍스트)만 줍니다.
+    *   서브에이전트는 이 작업이 벤치마크인지, 원본 파일 위치도 모른 채 주어진 컨텍스트만으로 답합니다 (치팅·추가 조회 차단). 답변은 `run.json` 에 채워집니다.
 2.  **무비용 채점 (Zero-Cost Grading)**:
-    *   답변 생성이 완료되면, 다시 독립된 서브에이전트를 띄워 채점 루브릭에 따라 답변을 1~3점으로 매기고 그 이유를 JSON 포맷으로 평가기에 전달합니다.
-    *   사용자는 어떠한 API 키도 발급받을 필요가 없으며, 에이전트의 월 구독 크레딧으로 벤치마크 전체 연산이 완결됩니다.
+    *   `grade-prompts` 가 채점 프롬프트를 만들고, 에이전트가 격리 채점 서브에이전트로 1~3점 + 사유(JSON)를 받아 `run.json` 에 채웁니다. `assemble` 이 집계·렌더링합니다.
+    *   API 키가 전혀 필요 없으며, 에이전트의 월 구독 크레딧으로 전체 연산이 완결됩니다.
 3.  **컨텍스트 기반 채점 + 검색/생성 분리 (Context-grounded Grading)**:
     *   채점기는 **검색된 컨텍스트를 함께 받아**, 환각(hallucination) 여부를 정답이 아니라 *제시된 컨텍스트* 기준으로 판정합니다. (컨텍스트에 없어서 "답변 불가"라고 정직하게 밝힌 것은 감점하지 않습니다.)
     *   `reference_notes` 대비 **검색 재현율(Retrieval Recall)** 을 별도로 계산하여, 점수 하락의 책임이 *검색*인지 *생성/추론*인지 분리합니다.
 4.  **재현성 (Reproducibility)**:
-    *   헤드라인 점수는 반복 실행(stability-runs)의 **평균**이며, 채점 결과는 `*.results.json` 캐시로 저장되어 `--from-results` 로 LLM 없이 보고서를 재생성할 수 있습니다.
+    *   헤드라인 점수는 반복 실행(stability-runs)의 **평균**이며, 채점 결과는 `report.results.json` 캐시로 저장되어 `evaluator.py render` 로 LLM 없이 보고서를 재생성할 수 있습니다.
 
 ---
 
@@ -172,7 +173,8 @@ second-brain-search-benchmark/
     │   ├── search.py       #   질의→stdout 검색 어댑터 (입력/고정)
     │   ├── answers.json    #   답변 캐시 (격리 에이전트 생성)
     │   ├── report.md       #   결과 보고서
-    │   └── report.results.json  # 채점 결과 캐시 (--from-results 재현용)
+    │   ├── run.json        #   작업 파일 (prepare→답변→grade-prompts→채점→assemble 핸드오프)
+    │   └── report.results.json  # 채점 결과 캐시 (render 재현용)
     └── no-engine/          # (예제) 검색엔진 없이 전체 폴더를 그대로 주는 어댑터 템플릿
         ├── README.md       #   = '무검색' 베이스라인. 점수는 답변 agent-model에 종속 → 모델별 폴더로 복사
         └── search.py

@@ -7,3 +7,6 @@ __pycache__/
 .ipynb_checkpoints/
 node_modules/
 .agents/
+
+# 평가 중간 작업 파일 (영속 기록은 report.results.json)
+engines/*/run.json

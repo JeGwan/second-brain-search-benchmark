@@ -50,9 +50,14 @@ if __name__ == "__main__":
 ```bash
 # 1) 평가할 엔진에 second_brain/ 를 색인한다 (엔진마다 방식이 다름)
 # 2) 어댑터 작성: engines/<your_engine>/search.py
-# 3) 평가 실행 (산출물은 engines/<your_engine>/ 아래로 모임)
-python3 evaluator.py --engine <your_engine> --interactive-agent
+# 3) 평가 실행 — 5단계 파이프라인 (산출물은 engines/<your_engine>/ 아래로 모임)
+python3 evaluator.py prepare --engine <your_engine> --stability-runs 2
+#   → (에이전트) run.json 의 answer_prompt 로 격리 답변 서브에이전트 → answer 채움
+python3 evaluator.py grade-prompts --engine <your_engine>
+#   → (에이전트) grade_prompt 로 격리 채점 서브에이전트 → score/reason 채움
+python3 evaluator.py assemble --engine <your_engine>
 ```
+보통은 에이전트에게 `/sbse-bench <your_engine>` 라고 요청하면 위 단계를 자동 수행합니다(SKILL.md).
 
 ## 4. 무검색(Full-Context) 베이스라인 — 검색/생성 분리
 어댑터가 정상인데 점수가 낮다면, 원인이 "검색이 근거 문서를 못 가져온 것"인지

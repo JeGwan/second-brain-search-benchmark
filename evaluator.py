@@ -2,19 +2,27 @@
 """
 세컨드 브레인 검색 엔진 벤치마크 평가기 (Second Brain Search Engine Benchmark Evaluator)
 
-이 스크립트는 검색 엔진의 답변을 받아 평가 기준(루브릭)에 따라 채점하고 보고서를 생성합니다.
+설계 원칙 (v4 — 대화형 프로토콜 폐기):
+  역할을 명확히 나눈다.
+   * 결정론적인 작업은 이 파이썬 평가기가 수행한다: 검색 어댑터 실행, 프롬프트 생성,
+     검색 재현율 계산, 점수 집계, 보고서 렌더링.
+   * '에이전트가 필요한' 작업(격리 서브에이전트로 답변/채점)은 평가기가 직접 하지 않고,
+     SKILL.md 가이드에 따라 오케스트레이터 에이전트가 수행한다.
+   * 둘은 단일 작업 파일(engines/<engine>/run.json)을 통해 주고받는다. (stdin 중계 없음)
 
-설계 원칙 (v3 — 타당성/재현성 개선):
-  1. 채점기는 '검색된 컨텍스트'를 함께 받는다. 환각(hallucination) 판정은
-     정답(ground truth)이 아니라 '제시된 컨텍스트' 기준으로만 이루어진다.
-  2. 검색 실패와 생성 실패를 분리한다. reference_notes 대비 검색 재현율
-     (Retrieval Recall)을 별도 지표로 계산해, 점수가 낮은 원인이 검색(retrieval)인지
-     생성(generation)인지 구분할 수 있게 한다.
-  3. 헤드라인 점수는 stability-runs '평균'으로 계산한다 (run1 단독 사용 금지).
-  4. 답변/채점 프롬프트는 단일 소스(build_* 함수)에서 생성한다. API/대화형/수동
-     모드가 동일한 프롬프트 텍스트를 사용하므로 결과가 모드 간 비교 가능하다.
-  5. 채점 결과(results)를 캐시로 덤프하고 --from-results 로 LLM 없이 보고서를
-     재현 생성할 수 있다.
+파이프라인:
+  1) prepare        : 검색 실행 → run.json 에 컨텍스트/재현율/답변프롬프트 기록
+  2) (에이전트)      : 격리 서브에이전트로 답변 생성 → run.json 의 answer 채움
+  3) grade-prompts  : 답변을 받아 컨텍스트 포함 채점 프롬프트 생성 → run.json 기록
+  4) (에이전트)      : 격리 서브에이전트로 채점 → run.json 의 score/reason 채움
+  5) assemble       : run.json 집계 → report.md + report.results.json
+  (render)          : 채점 결과 캐시(report.results.json)로부터 보고서만 재생성
+
+핵심 채점 원칙:
+  - 채점 프롬프트는 '검색된 컨텍스트'를 포함한다. 환각 판정은 정답이 아니라 컨텍스트 기준.
+  - reference_notes 대비 검색 재현율을 별도 계산해 검색 실패와 생성 실패를 분리한다.
+  - 헤드라인 점수는 stability-runs '평균'.
+  - API 키를 사용하지 않는다.
 """
 
 import os
@@ -26,9 +34,7 @@ import argparse
 import subprocess
 from datetime import datetime
 
-# 평가 질문 파일 경로 (기본값)
 DEFAULT_QUESTIONS_PATH = "questions.json"
-DEFAULT_REPORT_PATH = "benchmark_report.md"
 
 # 격리 컨텍스트에서 제거할 로컬 절대경로/파일 URI 패턴 (정보 누수 차단)
 _PATH_LEAK_PATTERNS = [
@@ -47,10 +53,10 @@ def load_questions(path):
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except FileNotFoundError:
-        print(f"❌ 에러: 질문지 파일을 찾을 수 없습니다. 경로: {path}")
+        print(f"❌ 에러: 질문지 파일을 찾을 수 없습니다. 경로: {path}", file=sys.stderr)
         sys.exit(1)
     except json.JSONDecodeError:
-        print(f"❌ 에러: 질문지 파일이 올바른 JSON 형식이 아닙니다. 경로: {path}")
+        print(f"❌ 에러: 질문지 파일이 올바른 JSON 형식이 아닙니다. 경로: {path}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -59,12 +65,12 @@ def load_questions(path):
 # ---------------------------------------------------------------------------
 
 def build_answer_prompt(question_text, context):
-    """답변 생성 프롬프트. API/대화형/수동 모든 모드가 이 함수를 사용한다."""
+    """답변 생성 프롬프트. 격리 답변 서브에이전트에 그대로 전달한다."""
     return f"""[답변 지시사항]
 제시된 컨텍스트(Retrieved Context)만을 바탕으로 질문에 한국어로 정확하게 답변하세요.
 절대로 외부 지식이나 상상력을 이용해 지어내거나(환각), 무리하게 추론하지 마세요.
 제시된 컨텍스트에 정보가 부족하다면, 어떤 정보가 누락되어 답변할 수 없는지 구체적으로 기술하세요.
-파일 경로나 시스템 위치를 추측해서 적지 마세요.
+파일 경로나 시스템 위치를 추측해서 적지 마세요. 어떤 도구도 사용하지 말고 오직 답변 텍스트만 출력하세요.
 
 [질문]
 {question_text}
@@ -75,11 +81,7 @@ def build_answer_prompt(question_text, context):
 
 
 def build_grade_prompt(question_text, ground_truth, rubric_str, answer, context):
-    """채점 프롬프트. 환각 판정은 '제시된 컨텍스트' 기준으로만 이루어진다.
-
-    context 가 빈 문자열이면(예: 사전 생성 답변 --answers 모드라 컨텍스트가 없음),
-    환각 판정 기준을 정답(ground truth)으로 완화한다는 점을 명시한다.
-    """
+    """채점 프롬프트. 환각 판정은 '제시된 컨텍스트' 기준으로만 이루어진다."""
     if context and context.strip():
         precision_rule = (
             "[중요 채점 규정 - 정밀도(Precision) 감점제]\n"
@@ -105,6 +107,7 @@ def build_grade_prompt(question_text, ground_truth, rubric_str, answer, context)
     return f"""[채점 지시사항]
 제시된 질문, 정답(Ground Truth), 채점 루브릭을 보고 후보 답변(Candidate Answer)을 평가하세요.
 반드시 루브릭 기준만을 준수하여 1점, 2점, 혹은 3점으로 채점하고 그 이유를 작성해 주세요.
+어떤 도구도 사용하지 말고, 아래 JSON 형식만 출력하세요.
 
 {precision_rule}
 질문: {question_text}
@@ -116,12 +119,8 @@ def build_grade_prompt(question_text, ground_truth, rubric_str, answer, context)
 후보 답변:
 {answer}
 
-출력 형식:
-반드시 아래 JSON 형식만 정확히 반환하세요. 다른 서두나 백틱(```json) 마크다운은 포함하지 마세요.
-{{
-  "score": <점수: 1, 2, 또는 3>,
-  "reason": "<한글 채점 사유, 감점 여부 포함>"
-}}
+출력 형식 (다른 서두나 백틱 없이 이 JSON 만):
+{{"score": <1|2|3>, "reason": "<한글 채점 사유, 감점 여부 포함>"}}
 """
 
 
@@ -141,134 +140,27 @@ def sanitize_context(context):
 
 def compute_retrieval_recall(context, reference_notes):
     """reference_notes(정답 도출에 필요한 원본 문서들)가 검색 컨텍스트에 얼마나
-    포함되었는지 비율(0.0~1.0)과 누락 문서 목록을 반환한다.
-
-    context 가 None 이면 (사전 생성 답변 모드 등) (None, None) 을 반환한다.
-    """
-    if context is None:
+    포함되었는지 비율(0.0~1.0)과 누락 문서 목록을 반환한다."""
+    if context is None or not reference_notes:
         return None, None
-    if not reference_notes:
-        return None, None
-
-    haystack = context
     present, missing = [], []
     for note in reference_notes:
-        stem = note[:-3] if note.endswith(".md") else note  # 확장자 제거
-        # 파일명 전체 또는 숫자 프리픽스 제거한 핵심 토큰으로 매칭
+        stem = note[:-3] if note.endswith(".md") else note
         core = re.sub(r"^\d+[_-]", "", stem)
-        if stem in haystack or (core and core in haystack):
+        if stem in context or (core and core in context):
             present.append(note)
         else:
             missing.append(note)
-
-    recall = len(present) / len(reference_notes)
-    return recall, missing
-
-
-# ---------------------------------------------------------------------------
-# 대화형(에이전트 서브에이전트) 채점/답변
-#
-# 본 벤치마크는 'API 키 무사용'을 원칙으로 한다. 채점/답변은 에이전트의 월구독
-# 크레딧으로 도는 격리 서브에이전트(--interactive-agent) 또는 수동 채점으로만
-# 수행한다. (외부 LLM API 호출 경로는 의도적으로 제거됨)
-# ---------------------------------------------------------------------------
-
-def _read_json_from_stdin(label):
-    lines = []
-    while True:
-        line = sys.stdin.readline()
-        if not line:
-            print(f"DEBUG {label}: EOF reached", file=sys.stderr)
-            break
-        print(f"DEBUG {label}: read line: {line.strip()}", file=sys.stderr)
-        lines.append(line)
-        try:
-            data = json.loads("".join(lines).strip())
-            if "score" in data:
-                return data
-        except json.JSONDecodeError:
-            pass
-    try:
-        raw_text = "".join(lines).strip()
-        if "```" in raw_text:
-            raw_text = raw_text.split("```")[1]
-            if raw_text.startswith("json"):
-                raw_text = raw_text[4:]
-        return json.loads(raw_text.strip())
-    except Exception:
-        return {"score": 1, "reason": "에이전트 채점 결과 파싱 실패."}
-
-
-def get_agent_graded(question_text, question_data, answer, context):
-    rubric_str = rubric_to_str(question_data["evaluation_rubric"])
-    prompt = build_grade_prompt(question_text, question_data["ground_truth"], rubric_str, answer, context)
-    print("=== SUBAGENT_PROMPT_START ===")
-    print(prompt.strip())
-    print("=== SUBAGENT_PROMPT_END ===")
-    sys.stdout.flush()
-    return _read_json_from_stdin("Grader")
-
-
-def get_agent_answer(question_text, context):
-    prompt = build_answer_prompt(question_text, context)
-    print("=== SUBAGENT_PROMPT_START ===")
-    print(prompt.strip())
-    print("=== SUBAGENT_PROMPT_END ===")
-    sys.stdout.flush()
-
-    lines = []
-    while True:
-        line = sys.stdin.readline()
-        if not line:
-            print("DEBUG Answer: EOF reached", file=sys.stderr)
-            break
-        print(f"DEBUG Answer: read line: {line.strip()}", file=sys.stderr)
-        if line.strip() == "=== SUBAGENT_ANSWER_END ===":
-            break
-        lines.append(line)
-    return "".join(lines).strip()
-
-
-def manual_grade(question_text, q, answer, context):
-    print("\n" + "=" * 60)
-    print(f"❓ 질문 ({q['id']}): {question_text}")
-    print(f"💡 정답 (Ground Truth): {q['ground_truth']}")
-    if context:
-        print("-" * 60)
-        print(f"🔎 검색된 컨텍스트(환각 판정 근거):\n{context[:2000]}")
-    print("-" * 60)
-    print(f"📥 엔진 답변:\n{answer}")
-    print("-" * 60)
-    print("📋 채점 루브릭:")
-    for score in sorted(q["evaluation_rubric"].keys(), reverse=True):
-        print(f"  [{score}점] {q['evaluation_rubric'][score]}")
-    print("=" * 60)
-
-    while True:
-        try:
-            score_input = input("👉 이 답변에 매길 점수를 입력하세요 (1, 2, 3): ").strip()
-            if score_input in ["1", "2", "3"]:
-                score = int(score_input)
-                break
-            print("⚠️ 올바른 점수(1, 2, 3)를 입력해 주세요.")
-        except KeyboardInterrupt:
-            print("\n👋 평가가 중단되었습니다.")
-            sys.exit(0)
-
-    reason = input("💬 평가 코멘트 (생략 가능, Enter): ").strip()
-    if not reason:
-        reason = "수동 채점 완료."
-    return {"score": score, "reason": reason}
+    return len(present) / len(reference_notes), missing
 
 
 def run_engine_search(engine, query):
     search_script = f"engines/{engine}/search.py"
     if not os.path.exists(search_script):
-        print(f"❌ 에러: 엔진 검색 스크립트를 찾을 수 없습니다. 경로: {search_script}")
+        print(f"❌ 에러: 엔진 검색 스크립트를 찾을 수 없습니다. 경로: {search_script}", file=sys.stderr)
         sys.exit(1)
-    cmd = ["python3", search_script, query]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        result = subprocess.run(["python3", search_script, query], capture_output=True, text=True, check=True)
         return result.stdout
     except subprocess.CalledProcessError as e:
         print(f"❌ 엔진 검색 실행 오류: {e.stderr}", file=sys.stderr)
@@ -276,7 +168,7 @@ def run_engine_search(engine, query):
 
 
 # ---------------------------------------------------------------------------
-# 통계/요약
+# 통계 / 집계
 # ---------------------------------------------------------------------------
 
 def calc_stats(scores):
@@ -284,18 +176,15 @@ def calc_stats(scores):
     if n == 0:
         return 0.0, 0.0
     mean = sum(scores) / n
-    var = sum((x - mean) ** 2 for x in scores) / n
-    return mean, math.sqrt(var)
+    return mean, math.sqrt(sum((x - mean) ** 2 for x in scores) / n)
 
 
 def summarize(results, stability_runs, eval_method, answer_source):
     axis_scores = {}
     total_score = 0.0
-    stds = []
-    recalls = []
+    stds, recalls = [], []
     for r in results:
-        axis = r["axis"]
-        a = axis_scores.setdefault(axis, {"score": 0.0, "max": 0, "count": 0})
+        a = axis_scores.setdefault(r["axis"], {"score": 0.0, "max": 0, "count": 0})
         a["score"] += r["score"]
         a["max"] += 3
         a["count"] += 1
@@ -303,26 +192,22 @@ def summarize(results, stability_runs, eval_method, answer_source):
         stds.append(r["stability_std"])
         if r.get("retrieval_recall") is not None:
             recalls.append(r["retrieval_recall"])
-
     max_score = len(results) * 3
-    percentage = (total_score / max_score) * 100 if max_score > 0 else 0.0
-    avg_std = sum(stds) / len(stds) if stds else 0.0
-    avg_recall = sum(recalls) / len(recalls) if recalls else None
     return {
         "total_score": total_score,
         "max_score": max_score,
-        "percentage": percentage,
+        "percentage": (total_score / max_score) * 100 if max_score else 0.0,
         "eval_method": eval_method,
         "answer_source": answer_source,
         "axis_scores": axis_scores,
         "stability_runs": stability_runs,
-        "avg_stability_std": avg_std,
-        "avg_retrieval_recall": avg_recall,
+        "avg_stability_std": sum(stds) / len(stds) if stds else 0.0,
+        "avg_retrieval_recall": sum(recalls) / len(recalls) if recalls else None,
     }
 
 
 # ---------------------------------------------------------------------------
-# 보고서 생성
+# 보고서 렌더링
 # ---------------------------------------------------------------------------
 
 def generate_report(results, summary, output_path, generated_at=None):
@@ -354,7 +239,6 @@ def generate_report(results, summary, output_path, generated_at=None):
         pct = (data["score"] / data["max"]) * 100 if data["max"] > 0 else 0
         report_md += f"| {axis} | {data['count']} | {data['score']:.1f} | {data['max']} | {pct:.1f}% |\n"
 
-    # 검색 재현율 (Retrieval vs Generation 분리)
     has_recall = any(r.get("retrieval_recall") is not None for r in results)
     report_md += """
 ## 3. 검색 재현율 분석 (Retrieval Recall — 검색 실패 vs 생성 실패 분리)
@@ -362,18 +246,15 @@ def generate_report(results, summary, output_path, generated_at=None):
 재현율이 낮으면 점수 하락의 책임은 '생성/추론'이 아니라 '검색'에 있습니다.
 """
     if not has_recall:
-        report_md += "\n> 이 보고서에는 검색 컨텍스트가 보존되지 않아(사전 생성 답변/캐시 재현) 검색 재현율을 계산할 수 없습니다. 엔진을 직접 실행(`--engine`)하면 문항별 재현율이 기록됩니다.\n"
+        report_md += "\n> 이 보고서에는 검색 컨텍스트가 보존되지 않아 검색 재현율을 계산할 수 없습니다.\n"
     else:
-        report_md += """| 문항 ID | 필요한 문서 수 | 검색 재현율 | 누락된 문서 |
-| :---: | :---: | :---: | :--- |
-"""
+        report_md += "| 문항 ID | 필요한 문서 수 | 검색 재현율 | 누락된 문서 |\n| :---: | :---: | :---: | :--- |\n"
         for r in results:
             if r.get("retrieval_recall") is None:
-                report_md += f"| {r['id']} | - | N/A (사전 생성 답변) | - |\n"
+                report_md += f"| {r['id']} | - | N/A | - |\n"
             else:
                 missing = ", ".join(r.get("retrieval_missing") or []) or "없음"
-                need = len(r.get("reference_notes") or [])
-                report_md += f"| {r['id']} | {need} | {r['retrieval_recall'] * 100:.0f}% | {missing} |\n"
+                report_md += f"| {r['id']} | {len(r.get('reference_notes') or [])} | {r['retrieval_recall'] * 100:.0f}% | {missing} |\n"
 
     report_md += """
 ## 4. 일관성 및 신뢰성 상세 분석 (Consistency & Reliability Analysis)
@@ -405,9 +286,7 @@ def generate_report(results, summary, output_path, generated_at=None):
             status = "🟢 안정" if std < 0.3 else ("🟡 보통" if std < 0.7 else "🔴 불안정")
             report_md += f"| {r['id']} | {r['stability_mean']:.2f}점 | {std:.3f} | {status} |\n"
 
-    report_md += """
-## 5. 문항별 세부 결과 (Detailed Results)
-"""
+    report_md += "\n## 5. 문항별 세부 결과 (Detailed Results)\n"
     for r in results:
         recall_line = ""
         if r.get("retrieval_recall") is not None:
@@ -428,27 +307,21 @@ def generate_report(results, summary, output_path, generated_at=None):
                 report_md += f"    *   *변형 {p_idx + 1}*: \"{pr['q_text']}\"\n"
                 report_md += f"        *   **점수**: {pr['score']}점 / **평가의견**: {pr['reason']}\n"
                 report_md += f"        *   **답변**: {pr['answer']}\n"
-
         if len(r.get("all_runs", [])) > 1:
             report_md += "\n*   **결정론적 일관성 반복 런 테스트**:\n"
             for run in r["all_runs"]:
                 report_md += f"    *   *런 {run['run_idx']}*: 점수 {run['score']}점 | 의견: {run['reason']}\n"
-
         report_md += "\n---\n"
 
-    try:
-        parent_dir = os.path.dirname(output_path)
-        if parent_dir and not os.path.exists(parent_dir):
-            os.makedirs(parent_dir, exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(report_md)
-        print(f"\n🎉 벤치마크 보고서가 생성되었습니다: {output_path}", file=sys.stderr)
-    except Exception as e:
-        print(f"❌ 에러: 보고서 파일 작성 중 오류 발생: {e}", file=sys.stderr)
+    parent = os.path.dirname(output_path)
+    if parent and not os.path.exists(parent):
+        os.makedirs(parent, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(report_md)
+    print(f"🎉 벤치마크 보고서가 생성되었습니다: {output_path}", file=sys.stderr)
 
 
 def dump_results_cache(results, summary, path, generated_at=None):
-    """LLM 없이 보고서를 재현 생성할 수 있도록 채점 결과를 직렬화한다."""
     payload = {
         "meta": {
             "generated_at": generated_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -458,31 +331,12 @@ def dump_results_cache(results, summary, path, generated_at=None):
         },
         "results": results,
     }
-    try:
-        parent = os.path.dirname(path)
-        if parent and not os.path.exists(parent):
-            os.makedirs(parent, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        print(f"💾 채점 결과 캐시를 저장했습니다 (재현용): {path}", file=sys.stderr)
-    except Exception as e:
-        print(f"⚠️ 결과 캐시 저장 실패: {e}", file=sys.stderr)
-
-
-def report_from_results_cache(cache_path, output_path):
-    with open(cache_path, "r", encoding="utf-8") as f:
-        payload = json.load(f)
-    results = payload["results"]
-    meta = payload.get("meta", {})
-    summary = summarize(
-        results,
-        meta.get("stability_runs", 1),
-        meta.get("eval_method", "캐시 재현"),
-        meta.get("answer_source", "캐시 재현"),
-    )
-    generate_report(results, summary, output_path, generated_at=meta.get("generated_at"))
-    print_cli_summary(summary)
-    return summary
+    parent = os.path.dirname(path)
+    if parent and not os.path.exists(parent):
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    print(f"💾 채점 결과 캐시를 저장했습니다 (재현용): {path}", file=sys.stderr)
 
 
 def print_cli_summary(summary):
@@ -491,7 +345,6 @@ def print_cli_summary(summary):
     print(f"- 총점(평균): {summary['total_score']:.1f} / {summary['max_score']} ({summary['percentage']:.1f}%)", file=sys.stderr)
     if summary.get("avg_retrieval_recall") is not None:
         print(f"- 평균 검색 재현율: {summary['avg_retrieval_recall'] * 100:.1f}%", file=sys.stderr)
-    print("- 영역별 달성도:", file=sys.stderr)
     for axis, data in summary["axis_scores"].items():
         pct = (data["score"] / data["max"]) * 100 if data["max"] else 0
         print(f"  * {axis}: {data['score']:.1f} / {data['max']} ({pct:.1f}%)", file=sys.stderr)
@@ -499,199 +352,246 @@ def print_cli_summary(summary):
 
 
 # ---------------------------------------------------------------------------
-# 메인
+# run.json 입출력
+# ---------------------------------------------------------------------------
+
+def run_file_path(args):
+    if args.run_file:
+        return args.run_file
+    if args.engine:
+        return f"engines/{args.engine}/run.json"
+    print("❌ 에러: --engine 또는 --run-file 이 필요합니다.", file=sys.stderr)
+    sys.exit(1)
+
+
+def load_run(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        print(f"❌ 에러: 작업 파일을 찾을 수 없습니다: {path} (먼저 prepare 를 실행하세요)", file=sys.stderr)
+        sys.exit(1)
+
+
+def save_run(run, path):
+    parent = os.path.dirname(path)
+    if parent and not os.path.exists(parent):
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(run, f, ensure_ascii=False, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# 1) prepare
+# ---------------------------------------------------------------------------
+
+def cmd_prepare(args):
+    questions = load_questions(args.questions)
+    path = run_file_path(args)
+    items = []
+    for q in questions:
+        qid = q["id"]
+        sub_tests = [{"key": qid, "type": "original", "text": q["question"]}]
+        for idx, pq in enumerate(q.get("paraphrased_questions", [])):
+            sub_tests.append({"key": f"{qid}_para{idx + 1}", "type": "paraphrased", "text": pq})
+        for st in sub_tests:
+            print(f"🔍 [{qid}] ({st['type']}) {args.engine} 검색...", file=sys.stderr)
+            context = sanitize_context(run_engine_search(args.engine, st["text"]))
+            recall, missing = compute_retrieval_recall(context, q.get("reference_notes", []))
+            for run_idx in range(1, args.stability_runs + 1):
+                items.append({
+                    "key": f"{st['key']}_run{run_idx}" if args.stability_runs > 1 else st["key"],
+                    "qid": qid,
+                    "type": st["type"],
+                    "run_idx": run_idx,
+                    "question": st["text"],
+                    "original_question": q["question"],
+                    "axis": q["axis"],
+                    "ground_truth": q["ground_truth"],
+                    "reference_notes": q.get("reference_notes", []),
+                    "rubric": q["evaluation_rubric"],
+                    "context": context,
+                    "retrieval_recall": recall,
+                    "retrieval_missing": missing,
+                    "answer_prompt": build_answer_prompt(st["text"], context),
+                    "answer": None,
+                    "grade_prompt": None,
+                    "score": None,
+                    "reason": None,
+                })
+    run = {
+        "meta": {
+            "engine": args.engine,
+            "stability_runs": args.stability_runs,
+            "questions_path": args.questions,
+            "answer_source": args.answer_source or f"{args.engine} 검색 + 격리 답변 생성",
+        },
+        "items": items,
+    }
+    save_run(run, path)
+    n_ans = len(items)
+    print(f"\n✅ prepare 완료: {path} ({n_ans}개 항목)", file=sys.stderr)
+    print("다음 단계: 각 항목의 'answer_prompt' 로 격리 답변 서브에이전트를 띄워 'answer' 를 채운 뒤,", file=sys.stderr)
+    print("           grade-prompts 를 실행하세요. (SKILL.md 참고)", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# 3) grade-prompts
+# ---------------------------------------------------------------------------
+
+def cmd_grade_prompts(args):
+    path = run_file_path(args)
+    run = load_run(path)
+    missing_ans = [it["key"] for it in run["items"] if not it.get("answer")]
+    if missing_ans:
+        print(f"❌ 에러: 아직 답변(answer)이 없는 항목이 있습니다: {missing_ans}", file=sys.stderr)
+        print("   모든 항목에 격리 답변 서브에이전트 결과를 채운 뒤 다시 실행하세요.", file=sys.stderr)
+        sys.exit(1)
+    for it in run["items"]:
+        it["grade_prompt"] = build_grade_prompt(
+            it["question"], it["ground_truth"], rubric_to_str(it["rubric"]), it["answer"], it.get("context") or "")
+    save_run(run, path)
+    print(f"✅ grade-prompts 완료: {path} ({len(run['items'])}개 채점 프롬프트 생성)", file=sys.stderr)
+    print("다음 단계: 각 항목의 'grade_prompt' 로 격리 채점 서브에이전트를 띄워 'score'/'reason' 을 채운 뒤,", file=sys.stderr)
+    print("           assemble 을 실행하세요.", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# 5) assemble
+# ---------------------------------------------------------------------------
+
+def cmd_assemble(args):
+    path = run_file_path(args)
+    run = load_run(path)
+    items = run["items"]
+    ungraded = [it["key"] for it in items if it.get("score") is None]
+    if ungraded:
+        print(f"❌ 에러: 아직 채점(score)이 없는 항목이 있습니다: {ungraded}", file=sys.stderr)
+        sys.exit(1)
+
+    meta = run.get("meta", {})
+    stability_runs = meta.get("stability_runs", 1)
+
+    # qid 순서 보존
+    order = []
+    by_qid = {}
+    for it in items:
+        if it["qid"] not in by_qid:
+            by_qid[it["qid"]] = []
+            order.append(it["qid"])
+        by_qid[it["qid"]].append(it)
+
+    results = []
+    for qid in order:
+        group = by_qid[qid]
+        originals = sorted([it for it in group if it["type"] == "original"], key=lambda x: x["run_idx"])
+        orig_scores = [it["score"] for it in originals]
+        omean, ostd = calc_stats(orig_scores)
+        base = originals[0]
+
+        recall_vals = [it["retrieval_recall"] for it in originals if it["retrieval_recall"] is not None]
+        q_recall = sum(recall_vals) / len(recall_vals) if recall_vals else None
+
+        # 변형 질문: 각 변형의 run1 점수
+        paras = {}
+        for it in group:
+            if it["type"] == "paraphrased":
+                paras.setdefault(it["qid"] + "|" + it["question"], []).append(it)
+        para_formatted, para_run1_scores = [], []
+        for key in sorted(paras.keys()):
+            runs = sorted(paras[key], key=lambda x: x["run_idx"])
+            r1 = runs[0]
+            para_run1_scores.append(r1["score"])
+            para_formatted.append({"q_text": r1["question"], "score": r1["score"],
+                                   "reason": r1["reason"], "answer": r1["answer"]})
+
+        base_round = round(omean)
+        pool = [base_round] + para_run1_scores
+        sem_pct = (sum(1 for s in pool if s == base_round) / len(pool)) * 100 if pool else 100.0
+        para_mean, _ = calc_stats([omean] + para_run1_scores)
+
+        results.append({
+            "id": qid,
+            "axis": base["axis"],
+            "question": base.get("original_question", base["question"]),
+            "ground_truth": base["ground_truth"],
+            "reference_notes": base.get("reference_notes", []),
+            "answer": base["answer"],
+            "score": omean,
+            "reason": base["reason"],
+            "all_runs": [{"run_idx": it["run_idx"], "answer": it["answer"],
+                          "score": it["score"], "reason": it["reason"]} for it in originals],
+            "stability_mean": omean,
+            "stability_std": ostd,
+            "retrieval_recall": q_recall,
+            "retrieval_missing": base.get("retrieval_missing"),
+            "paraphrased_results": para_formatted if para_formatted else None,
+            "semantic_avg": para_mean,
+            "semantic_robustness_pct": sem_pct,
+        })
+
+    eval_method = meta.get("eval_method", "에이전트 격리 채점 (서브에이전트 오케스트레이션)")
+    answer_source = meta.get("answer_source", "엔진 검색 + 격리 답변 생성")
+    summary = summarize(results, stability_runs, eval_method, answer_source)
+
+    output = args.output or (f"engines/{meta.get('engine')}/report.md" if meta.get("engine") else "benchmark_report.md")
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    generate_report(results, summary, output, generated_at=generated_at)
+    cache_path = f"{os.path.splitext(output)[0]}.results.json"
+    dump_results_cache(results, summary, cache_path, generated_at=generated_at)
+    print_cli_summary(summary)
+
+
+# ---------------------------------------------------------------------------
+# render (채점 결과 캐시 → 보고서)
+# ---------------------------------------------------------------------------
+
+def cmd_render(args):
+    with open(args.source, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    results = payload["results"]
+    meta = payload.get("meta", {})
+    summary = summarize(results, meta.get("stability_runs", 1),
+                        meta.get("eval_method", "캐시 재현"), meta.get("answer_source", "캐시 재현"))
+    output = args.output or os.path.join(os.path.dirname(args.source) or ".", "report.md")
+    generate_report(results, summary, output, generated_at=meta.get("generated_at"))
+    print_cli_summary(summary)
+
+
+# ---------------------------------------------------------------------------
+# CLI
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="세컨드 브레인 검색 엔진 벤치마크 채점기")
-    parser.add_argument("--questions", default=DEFAULT_QUESTIONS_PATH, help="질문지 JSON 파일 경로")
-    parser.add_argument("--answers", help="검색 엔진의 답변이 저장된 JSON 파일 경로 (제공 시 검색 단계를 건너뜀)")
-    parser.add_argument("--engine", help="대상 검색 엔진 이름 (예: qmd) - --answers 미지정 시 필수")
-    parser.add_argument("--output", default=None, help="출력 보고서 경로 (미지정 시 --engine 이면 engines/<engine>/report.md)")
-    parser.add_argument("--interactive-agent", action="store_true", help="API 키 없이 에이전트와 대화식 격리 환경(Subagent)으로 답변 및 채점 수행")
-    parser.add_argument("--stability-runs", type=int, default=1, help="결정론적 일관성 측정을 위해 각 질문을 반복 실행할 횟수")
-    parser.add_argument("--from-results", help="채점 결과 캐시(JSON)로부터 LLM 없이 보고서를 재현 생성합니다.")
+    parser = argparse.ArgumentParser(description="세컨드 브레인 검색 엔진 벤치마크 평가기 (대화형 프로토콜 없음)")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("prepare", help="검색 실행 → run.json 에 컨텍스트/재현율/답변프롬프트 기록")
+    p.add_argument("--engine", required=True, help="대상 검색 엔진(어댑터 폴더) 이름")
+    p.add_argument("--questions", default=DEFAULT_QUESTIONS_PATH)
+    p.add_argument("--stability-runs", type=int, default=1, help="각 질문 반복 실행 횟수(결정론적 일관성)")
+    p.add_argument("--run-file", help="작업 파일 경로 (기본 engines/<engine>/run.json)")
+    p.add_argument("--answer-source", help="보고서에 기록할 답변 출처 설명(예: 답변 모델명)")
+    p.set_defaults(func=cmd_prepare)
+
+    g = sub.add_parser("grade-prompts", help="답변을 받아 컨텍스트 포함 채점 프롬프트 생성")
+    g.add_argument("--engine")
+    g.add_argument("--run-file")
+    g.set_defaults(func=cmd_grade_prompts)
+
+    a = sub.add_parser("assemble", help="run.json 집계 → report.md + report.results.json")
+    a.add_argument("--engine")
+    a.add_argument("--run-file")
+    a.add_argument("--output", help="보고서 경로 (기본 engines/<engine>/report.md)")
+    a.set_defaults(func=cmd_assemble)
+
+    r = sub.add_parser("render", help="채점 결과 캐시(report.results.json)로부터 보고서만 재생성")
+    r.add_argument("source", help="report.results.json 경로")
+    r.add_argument("--output", help="보고서 경로 (기본 캐시와 같은 폴더의 report.md)")
+    r.set_defaults(func=cmd_render)
 
     args = parser.parse_args()
-
-    # 출력 경로 기본값 결정: 엔진별 산출물은 engines/<engine>/ 아래로 모은다.
-    if not args.output:
-        if args.engine:
-            args.output = f"engines/{args.engine}/report.md"
-        elif args.from_results:
-            # 캐시와 같은 위치에 report.md 생성
-            args.output = os.path.join(os.path.dirname(args.from_results) or ".", "report.md")
-        else:
-            args.output = DEFAULT_REPORT_PATH
-
-    # 0. 캐시 재현 모드: LLM/엔진 없이 보고서만 다시 생성
-    if args.from_results:
-        report_from_results_cache(args.from_results, args.output)
-        return
-
-    # 1. 질문지 로드
-    questions = load_questions(args.questions)
-
-    # 2. 평가 방식 결정 (API 키 무사용 — 격리 에이전트 또는 수동 채점)
-    eval_method = "수동 채점 (Interactive CLI)"
-    if args.interactive_agent:
-        eval_method = "에이전트 격리 채점 (Interactive Subagent)"
-
-    answers_dict = {}
-    if args.answers:
-        try:
-            with open(args.answers, "r", encoding="utf-8") as f:
-                answers_dict = json.load(f)
-            answer_source = f"사전 생성 답변 파일 ({args.answers}) — 검색 컨텍스트 없음"
-            print(f"📂 답변 파일을 로드했습니다: {args.answers}", file=sys.stderr)
-        except Exception as e:
-            print(f"❌ 에러: 답변 파일을 읽는 중 오류 발생: {e}", file=sys.stderr)
-            sys.exit(1)
-    elif not args.engine:
-        print("❌ 에러: --answers 파일을 주지 않을 경우, --engine 파라미터가 필수적입니다.", file=sys.stderr)
-        sys.exit(1)
-    else:
-        answer_source = f"실시간 엔진 검색 ({args.engine}) + 격리 답변 생성"
-
-    # 3. 채점 및 답변 생성 진행
-    results = []
-    contexts_cache = {}
-
-    for q in questions:
-        q_id = q["id"]
-        axis = q["axis"]
-        reference_notes = q.get("reference_notes", [])
-
-        # 서브 테스트 생성 (원본 + 변형 질문)
-        sub_tests = [{"q_text": q["question"], "type": "original", "key": q_id}]
-        for idx, pq in enumerate(q.get("paraphrased_questions", [])):
-            sub_tests.append({"q_text": pq, "type": "paraphrased", "key": f"{q_id}_para{idx + 1}"})
-
-        sub_test_results = []
-        for st in sub_tests:
-            st_key = st["key"]
-            st_runs = []
-            for run_idx in range(args.stability_runs):
-                run_key = f"{st_key}_run{run_idx + 1}" if args.stability_runs > 1 else st_key
-
-                # 답변 + 컨텍스트 획득
-                context = None
-                if run_key in answers_dict:
-                    answer = answers_dict[run_key]
-                else:
-                    print(f"🔍 [{q_id}] ({st['type']}) Run {run_idx + 1}/{args.stability_runs} - {args.engine} 검색 엔진으로 컨텍스트 조회...", file=sys.stderr)
-                    context = sanitize_context(run_engine_search(args.engine, st["q_text"]))
-                    contexts_cache[run_key] = context
-                    if args.interactive_agent:
-                        answer = get_agent_answer(st["q_text"], context)
-                    else:
-                        print("\n" + "=" * 50, file=sys.stderr)
-                        print(f"❓ [{q_id}] ({st['type']} - Run {run_idx + 1}) {st['q_text']}", file=sys.stderr)
-                        print("=" * 50, file=sys.stderr)
-                        print("엔진의 답변을 입력하세요. 입력이 끝나면 빈 줄에서 Ctrl+D를 누르세요:", file=sys.stderr)
-                        lines = []
-                        try:
-                            for line in sys.stdin:
-                                lines.append(line)
-                            answer = "".join(lines).strip()
-                        except KeyboardInterrupt:
-                            print("\n👋 평가가 중단되었습니다.", file=sys.stderr)
-                            sys.exit(0)
-
-                # 채점 (검색 컨텍스트를 함께 전달 → 환각 판정 근거)
-                if not answer:
-                    score_data = {"score": 1, "reason": "답변이 제출되지 않았습니다."}
-                else:
-                    grade_context = context if context is not None else ""
-                    if args.interactive_agent:
-                        score_data = get_agent_graded(st["q_text"], q, answer, grade_context)
-                    else:
-                        score_data = manual_grade(st["q_text"], q, answer, grade_context)
-
-                recall, missing = compute_retrieval_recall(context, reference_notes)
-                st_runs.append({
-                    "run_idx": run_idx + 1,
-                    "answer": answer,
-                    "score": score_data["score"],
-                    "reason": score_data["reason"],
-                    "retrieval_recall": recall,
-                    "retrieval_missing": missing,
-                })
-
-                if not args.answers:
-                    answers_dict[run_key] = answer
-
-            sub_test_results.append({"q_text": st["q_text"], "type": st["type"], "runs": st_runs})
-
-        # 원본 질문 런 → 헤드라인은 평균 사용
-        orig_runs = [r for r in sub_test_results if r["type"] == "original"][0]["runs"]
-        orig_scores = [r["score"] for r in orig_runs]
-        orig_mean, orig_std = calc_stats(orig_scores)
-
-        # 검색 재현율: 원본 런들 중 컨텍스트가 있는 것들의 평균
-        recall_vals = [r["retrieval_recall"] for r in orig_runs if r["retrieval_recall"] is not None]
-        q_recall = sum(recall_vals) / len(recall_vals) if recall_vals else None
-        # 누락 문서는 run1 기준(있으면)
-        q_missing = next((r["retrieval_missing"] for r in orig_runs if r["retrieval_missing"] is not None), None)
-
-        base_answer = orig_runs[0]["answer"]
-        base_reason = orig_runs[0]["reason"]
-
-        # 의미론적 일관성 (변형 질문 run1 vs 원본 평균)
-        para_results = [r for r in sub_test_results if r["type"] == "paraphrased"]
-        para_run1_scores = [r["runs"][0]["score"] for r in para_results]
-        para_scores = [orig_mean] + para_run1_scores
-        para_mean, _ = calc_stats(para_scores) if para_scores else (orig_mean, 0.0)
-        # 일치도: 변형 질문 점수가 원본 '반올림 평균'과 같은 비율
-        base_round = round(orig_mean)
-        match_pool = [round(orig_mean)] + para_run1_scores
-        matches = sum(1 for s in match_pool if s == base_round)
-        semantic_robustness_pct = (matches / len(match_pool)) * 100 if match_pool else 100.0
-
-        para_formatted = [{
-            "q_text": pr["q_text"],
-            "score": pr["runs"][0]["score"],
-            "reason": pr["runs"][0]["reason"],
-            "answer": pr["runs"][0]["answer"],
-        } for pr in para_results]
-
-        results.append({
-            "id": q_id,
-            "axis": axis,
-            "question": q["question"],
-            "ground_truth": q["ground_truth"],
-            "reference_notes": reference_notes,
-            "answer": base_answer,
-            "score": orig_mean,
-            "reason": base_reason,
-            "all_runs": orig_runs if len(orig_runs) > 1 else [],
-            "stability_mean": orig_mean,
-            "stability_std": orig_std,
-            "retrieval_recall": q_recall,
-            "retrieval_missing": q_missing,
-            "paraphrased_results": para_formatted if para_formatted else None,
-            "semantic_avg": para_mean,
-            "semantic_robustness_pct": semantic_robustness_pct,
-        })
-
-    # 4. 답변/컨텍스트 캐시 저장
-    if not args.answers and args.engine:
-        try:
-            with open(f"engines/{args.engine}/answers.json", "w", encoding="utf-8") as f:
-                json.dump(answers_dict, f, ensure_ascii=False, indent=2)
-            print(f"💾 생성된 엔진 답변이 기록되었습니다: engines/{args.engine}/answers.json", file=sys.stderr)
-            with open(f"engines/{args.engine}/contexts.json", "w", encoding="utf-8") as f:
-                json.dump(contexts_cache, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"⚠️ 답변/컨텍스트 캐시 저장 실패: {e}", file=sys.stderr)
-
-    # 5. 요약 + 보고서 + 결과 캐시
-    summary = summarize(results, args.stability_runs, eval_method, answer_source)
-    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    generate_report(results, summary, args.output, generated_at=generated_at)
-    cache_path = f"{os.path.splitext(args.output)[0]}.results.json"
-    dump_results_cache(results, summary, cache_path, generated_at=generated_at)
-    print_cli_summary(summary)
+    args.func(args)
 
 
 if __name__ == "__main__":

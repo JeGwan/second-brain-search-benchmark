@@ -5,7 +5,7 @@
 스크립트는 이 어댑터를 배포하지 않습니다. 어댑터 규약은 `../README.md` 참고.)
 
 본 벤치마크는 **API 키를 사용하지 않습니다.** 답변/채점은 에이전트의 월구독
-크레딧으로 도는 격리 서브에이전트(`--interactive-agent`)가 수행합니다.
+크레딧으로 도는 격리 서브에이전트가 수행합니다.
 
 ---
 
@@ -24,19 +24,22 @@ qmd collection add second_brain
 qmd embed
 ```
 
-### 3단계: 벤치마크 실행 (격리 에이전트 모드)
-루트에서 평가기를 격리 에이전트 모드로 구동합니다. 검색은 `search.py` 어댑터가
-수행하고(top-N 은 `QMD_TOP_N` 환경변수로 조정, 기본 5), 답변/채점은 격리 서브에이전트가
-담당합니다.
+### 3단계: 벤치마크 실행 (5단계 파이프라인)
+검색은 `search.py` 어댑터가 수행하고(top-N 은 `QMD_TOP_N` 환경변수로 조정, 기본 5),
+답변/채점은 에이전트가 격리 서브에이전트로 수행합니다. 보통은 에이전트에게
+`/sbse-bench qmd` 라고 요청하면 아래를 자동 수행합니다.
 ```bash
-python3 evaluator.py --engine qmd --interactive-agent
+python3 evaluator.py prepare --engine qmd --stability-runs 2 --answer-source "<답변 모델명>"
+#   → (에이전트) run.json 의 answer_prompt 로 격리 답변 서브에이전트 → answer 채움
+python3 evaluator.py grade-prompts --engine qmd
+#   → (에이전트) grade_prompt 로 격리 채점 서브에이전트 → score/reason 채움
+python3 evaluator.py assemble --engine qmd
 ```
-실행이 끝나면 `engines/qmd/` 한 폴더에 `answers.json`(답변 캐시), `contexts.json`
-(검색 컨텍스트 캐시), `report.md`(보고서), `report.results.json`(채점 결과 캐시)이
-생성됩니다.
+산출물은 `engines/qmd/` 한 폴더에: `run.json`(작업 파일), `report.md`(보고서),
+`report.results.json`(채점 결과 캐시)가 생성됩니다.
 
 ### 4단계: 보고서 재생성 (LLM/엔진 불필요)
 채점 결과 캐시로부터 보고서만 다시 만들 수 있습니다.
 ```bash
-python3 evaluator.py --from-results engines/qmd/report.results.json
+python3 evaluator.py render engines/qmd/report.results.json
 ```
