@@ -10,3 +10,6 @@ node_modules/
 
 # 평가 중간 작업 파일 (영속 기록은 report.results.json)
 engines/*/run.json
+
+# superpowers 설계 스펙 (로컬 작업용, 최종 푸시 제외)
+docs/superpowers/
