@@ -2,7 +2,7 @@
 
 세컨드 브레인 검색 엔진 벤치마크(SBSE-Bench)는 위키(Wiki)나 마크다운 폴더와 같은 비정형 지식 뭉치(세컨드 브레인)에서 정보와 맥락을 얼마나 정확하게 검색·추출하는지 평가하기 위한 오픈 소스 벤치마크 도구입니다.
 
-이 리포지토리는 API 키(비용 지불) 없이, 사용자의 월 구독형 AI 에이전트(Claude Code, Antigravity 등)가 가진 로컬 실행 권한과 스킬 기능을 기반으로 완전 자동 벤치마크를 수행하도록 최적화되어 있습니다.
+이 리포지토리는 API 키 발급 및 비용 지불 없이, 사용자가 월 구독형으로 사용하는 다양한 AI 에이전트(Antigravity, Claude Code, Codex 등)의 실행 권한을 활용하여 안전하게 격리된 무맥락 벤치마크를 수행할 수 있도록 설계되어 있습니다.
 
 ---
 
@@ -25,8 +25,7 @@ second-brain-search-benchmark/
 ├── engines/                # 각 검색 엔진별 플러그인 폴더
 │   └── qmd/                
 │       ├── README.md       
-│       ├── search.py       # QMD 검색 연산 수행 및 stdout 출력 스크립트
-│       └── answers.json    # 캐싱된 QMD 답변 결과 파일
+│       └── search.py       # QMD 검색 연산 수행 및 stdout 출력 스크립트
 └── results/                # 엔진별 최종 벤치마크 점수 보고서 보관함
     ├── .gitkeep
     └── qmd_report.md       # QMD의 공식 벤치마크 결과 보고서
@@ -34,29 +33,65 @@ second-brain-search-benchmark/
 
 ---
 
-## 🚀 벤치마크 구동 방법 (에이전트 사용자용)
+## 🚀 에이전트별 설치 및 구동 방법 (Agent Setup Guide)
 
-### 1단계: 스킬 설치 (Install Skill)
-터미널에서 에이전트를 통해 아래 설치 스크립트를 실행합니다.
-```bash
-# 워크스페이스에 스킬 설치 (기본값)
-./installer.py --workspace-install
+사용자는 로컬에 소스코드를 클론할 필요 없이, 자신이 사용하는 에이전트 환경에서 한 줄의 설치 명령어를 통해 벤치마크 스킬과 필요 데이터를 간편하게 구성할 수 있습니다.
 
-# 글로벌 에이전트 설정 디렉토리에 설치
-./installer.py --global-install
-```
-설치 완료 시 에이전트가 새로운 명령어 `/sbse-bench`를 인식하게 됩니다.
+### 1. Antigravity (Gemini-based Agent)
 
-### 2단계: 대상 검색 엔진 설정
-테스트하려는 엔진 폴더(예: `engines/qmd/`)의 가이드에 따라 `second_brain/` 데이터셋을 인덱싱합니다.
-(예: QMD의 경우 `npx @tobilu/qmd collection add second_brain` 및 `qmd embed` 실행)
+Antigravity CLI는 파일 구조 기반의 커스텀 **스킬(Skills)** 시스템을 지원합니다.
 
-### 3단계: 벤치마크 명령어 실행
-에이전트와의 채팅창에 다음 명령어를 입력합니다.
-```
-/sbse-bench qmd
-```
-또는 "sbse-bench 스킬로 qmd 벤치마크 수행해줘"라고 한글로 요청하셔도 됩니다.
+*   **설치 방법**:
+    에이전트 채팅창에 직접 다음과 같이 지시하거나 터미널 쉘에 한 줄 명령을 실행합니다.
+    > "https://github.com/JeGwan/second-brain-search-benchmark 스킬을 내 로컬 워크스페이스에 설치해줘."
+    
+    *(또는 터미널 직접 실행)*
+    ```bash
+    curl -fsSL https://raw.githubusercontent.com/JeGwan/second-brain-search-benchmark/main/installer.py | python3 - --workspace-install
+    ```
+*   **실행 방법**:
+    스킬 설치가 완료되면, 채팅창에 아래와 같이 슬래시 명령어를 입력하여 실행합니다.
+    ```
+    /sbse-bench qmd
+    ```
+
+---
+
+### 2. Claude Code (Anthropic CLI Agent)
+
+Claude Code는 터미널 실행에 특화되어 있으며, 쉘 명령어와의 양방향 연동이 원활합니다.
+
+*   **설치 방법**:
+    Claude Code 프롬프트에 직접 다음 명령 실행을 요청합니다.
+    ```bash
+    curl -fsSL https://raw.githubusercontent.com/JeGwan/second-brain-search-benchmark/main/installer.py | python3
+    ```
+*   **실행 방법**:
+    Claude Code에게 평가기를 기동하고 실시간 프롬프트 브래킷에 자동 대응하도록 요청합니다.
+    > "아래 명령어로 평가기를 구동하고, `=== SUBAGENT_PROMPT_START ===` 마커와 함께 질문이 제공되면 다른 문서를 직접 열지 말고(격리), 질문에 포함된 컨텍스트 정보만 참고하여 답변해줘."
+    
+    ```bash
+    python3 evaluator.py --engine qmd --interactive-agent
+    ```
+
+---
+
+### 3. Codex (OpenAI Developer Agent Framework)
+
+Codex 및 커스텀 에이전트 프레임워크 환경에서의 연동법입니다.
+
+*   **설치 방법**:
+    Codex 터미널이나 에이전트 쉘 명령어로 인스톨러를 구동합니다.
+    ```bash
+    curl -fsSL https://raw.githubusercontent.com/JeGwan/second-brain-search-benchmark/main/installer.py | python3
+    ```
+*   **실행 방법**:
+    Claude와 동일하게, Codex가 직접 횡령 문서를 읽는 편법(치팅)을 쓰지 않도록 실행 프롬프트를 셋팅하여 기동합니다.
+    > "아래 명령어를 실행하고, `=== SUBAGENT_PROMPT` 마커가 감지되면 출력된 텍스트 범위 내에서만 100% 무맥락 격리 상태로 답변을 순차적으로 작성해서 stdin으로 입력해줘."
+    
+    ```bash
+    python3 evaluator.py --engine qmd --interactive-agent
+    ```
 
 ---
 
