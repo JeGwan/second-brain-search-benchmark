@@ -16,7 +16,7 @@ description: Runs the Second Brain Search Engine Benchmark (SBSE-Bench) on a spe
 본 벤치마크는 **답변 작성용 LLM**과 **채점용 LLM**을 격리하여, 에이전트가 벤치마크 진행 상황이나 다른 문서를 참조하지 못하게 차단(무맥락 격리)하고 순수한 검색 엔진의 성능을 측정해야 합니다.
 
 ### 1단계: 벤치마크 평가기 기동
-1.  벤치마크 작업 디렉토리 `/Users/user/Projects/knowledge-graph/10_Projects/Second Brain 벤치마크`로 이동합니다.
+1.  벤치마크 작업 디렉토리(설치된 리포지토리 폴더)로 이동합니다.
 2.  사용자가 지정한 엔진명(예: `qmd`)을 기반으로 아래 명령어를 백그라운드로 실행(Propose)합니다.
     ```bash
     python3 evaluator.py --engine <엔진이름> --interactive-agent --output results/<엔진이름>_report.md
