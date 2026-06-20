@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import unittest
@@ -61,6 +62,26 @@ class TestSemanticConsistency(unittest.TestCase):
 
     def test_no_paraphrases_returns_none(self):
         self.assertIsNone(evaluator.compute_semantic_consistency({"a"}, []))
+
+
+class TestQuestionsSchema(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        path = os.path.join(os.path.dirname(__file__), "..", "questions.json")
+        with open(path, encoding="utf-8") as f:
+            cls.qs = json.load(f)
+
+    def test_every_question_has_key_facts(self):
+        for q in self.qs:
+            self.assertIn("key_facts", q, q["id"])
+            self.assertTrue(q["key_facts"], q["id"])
+            for kf in q["key_facts"]:
+                self.assertIn("label", kf)
+                self.assertTrue(kf.get("aliases"), f"{q['id']} {kf.get('label')}")
+
+    def test_no_legacy_rubric(self):
+        for q in self.qs:
+            self.assertNotIn("evaluation_rubric", q, q["id"])
 
 
 if __name__ == "__main__":
