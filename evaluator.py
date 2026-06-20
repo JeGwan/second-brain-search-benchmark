@@ -32,9 +32,21 @@ import json
 import math
 import argparse
 import subprocess
+import unicodedata
 from datetime import datetime
 
 DEFAULT_QUESTIONS_PATH = "questions.json"
+
+
+def normalize(text):
+    """매칭용 정규화: NFKC → 소문자 → 천단위 콤마 제거 → 공백 정리."""
+    if not text:
+        return ""
+    t = unicodedata.normalize("NFKC", text)
+    t = t.lower()
+    t = re.sub(r"(?<=\d),(?=\d)", "", t)      # 1,000 → 1000
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
 
 # 격리 컨텍스트에서 제거할 로컬 절대경로/파일 URI 패턴 (정보 누수 차단)
 _PATH_LEAK_PATTERNS = [
