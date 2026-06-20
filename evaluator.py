@@ -166,6 +166,28 @@ def compute_retrieval_recall(context, reference_notes):
     return len(present) / len(reference_notes), missing
 
 
+def compute_keyfact_coverage(context, key_facts):
+    """문항의 key_facts 각각이 검색 컨텍스트에 (정규화 후) 등장하는지 매칭.
+    반환: (coverage 0.0~1.0 | None, facts 상세 목록)."""
+    if not key_facts:
+        return None, []
+    norm_ctx = normalize(context or "")
+    facts = []
+    found_count = 0
+    for kf in key_facts:
+        matched = None
+        for alias in kf.get("aliases", []):
+            na = normalize(alias)
+            if na and na in norm_ctx:
+                matched = alias
+                break
+        if matched is not None:
+            found_count += 1
+        facts.append({"label": kf["label"], "found": matched is not None,
+                      "matched_alias": matched})
+    return found_count / len(key_facts), facts
+
+
 def run_engine_search(engine, query):
     search_script = f"engines/{engine}/search.py"
     if not os.path.exists(search_script):

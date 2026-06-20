@@ -22,5 +22,29 @@ class TestNormalize(unittest.TestCase):
         self.assertEqual(evaluator.normalize(None), "")
 
 
+class TestKeyfactCoverage(unittest.TestCase):
+    KF = [
+        {"label": "송금 액수", "aliases": ["$500,000", "50만 달러", "500000"]},
+        {"label": "승인 번호", "aliases": ["TX-9921", "TX9921"]},
+    ]
+
+    def test_full_coverage_with_alias_and_normalization(self):
+        ctx = "6월 14일 $500,000 거래, 결재 번호 TX-9921 처리됨."
+        cov, facts = evaluator.compute_keyfact_coverage(ctx, self.KF)
+        self.assertEqual(cov, 1.0)
+        self.assertTrue(all(f["found"] for f in facts))
+
+    def test_partial_coverage(self):
+        ctx = "송금액은 50만 달러였다."  # 승인 번호 없음
+        cov, facts = evaluator.compute_keyfact_coverage(ctx, self.KF)
+        self.assertEqual(cov, 0.5)
+        self.assertIsNone([f for f in facts if f["label"] == "승인 번호"][0]["matched_alias"])
+
+    def test_empty_key_facts(self):
+        cov, facts = evaluator.compute_keyfact_coverage("아무 텍스트", [])
+        self.assertIsNone(cov)
+        self.assertEqual(facts, [])
+
+
 if __name__ == "__main__":
     unittest.main()
