@@ -61,5 +61,5 @@ python3 evaluator.py run --engine <엔진이름>
    - **평균 의미론적 일관성** — 변형 질의에서도 같은 사실을 회수했는가.
 2. 책임 소재 해석: 문서 재현율은 100% 인데 핵심사실 커버리지가 낮으면 **문서는 찾았으나
    청크 경계가 정답 줄을 놓친** 경우(청크 커버리지 문제)입니다.
-3. LLM 없이 보고서만 다시 만들려면:
+3. 캐시에서 보고서만 다시 생성하려면:
    `python3 evaluator.py render engines/<엔진>/report.results.json`

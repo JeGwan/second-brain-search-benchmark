@@ -48,7 +48,7 @@ python3 evaluator.py run --engine <engine>
 단일 명령으로 끝납니다. 별도 단계·작업 파일·반복 실행이 없으며, 검색이 결정론적이라
 어떤 환경에서 돌려도 동일한 보고서가 나옵니다.
 
-> LLM 없이 캐시에서 보고서만 다시 만들려면:
+> 캐시에서 보고서만 다시 생성하려면:
 > `python3 evaluator.py render engines/<engine>/report.results.json`
 
 ---

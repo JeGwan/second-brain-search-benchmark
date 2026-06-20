@@ -2,27 +2,27 @@
 """
 세컨드 브레인 검색 엔진 벤치마크 평가기 (Second Brain Search Engine Benchmark Evaluator)
 
-설계 원칙 (v4 — 대화형 프로토콜 폐기):
-  역할을 명확히 나눈다.
-   * 결정론적인 작업은 이 파이썬 평가기가 수행한다: 검색 어댑터 실행, 프롬프트 생성,
-     검색 재현율 계산, 점수 집계, 보고서 렌더링.
-   * '에이전트가 필요한' 작업(격리 서브에이전트로 답변/채점)은 평가기가 직접 하지 않고,
-     SKILL.md 가이드에 따라 오케스트레이터 에이전트가 수행한다.
-   * 둘은 단일 작업 파일(engines/<engine>/run.json)을 통해 주고받는다. (stdin 중계 없음)
+목적:
+  비정형 지식 뭉치(세컨드 브레인)에 대한 검색 레이어 성능을 결정론적으로 측정한다.
 
-파이프라인:
-  1) prepare        : 검색 실행 → run.json 에 컨텍스트/재현율/답변프롬프트 기록
-  2) (에이전트)      : 격리 서브에이전트로 답변 생성 → run.json 의 answer 채움
-  3) grade-prompts  : 답변을 받아 컨텍스트 포함 채점 프롬프트 생성 → run.json 기록
-  4) (에이전트)      : 격리 서브에이전트로 채점 → run.json 의 score/reason 채움
-  5) assemble       : run.json 집계 → report.md + report.results.json
-  (render)          : 채점 결과 캐시(report.results.json)로부터 보고서만 재생성
+설계 원칙:
+  평가기는 LLM/에이전트 없이 결정론적인 일만 한다.
+   * 검색 어댑터(engines/<engine>/search.py)를 실행한다.
+   * 핵심사실 커버리지·문서 재현율·의미론적 일관성을 계산한다.
+   * 보고서(report.md)와 결과 캐시(report.results.json)를 생성한다.
 
-핵심 채점 원칙:
-  - 채점 프롬프트는 '검색된 컨텍스트'를 포함한다. 환각 판정은 정답이 아니라 컨텍스트 기준.
-  - reference_notes 대비 검색 재현율을 별도 계산해 검색 실패와 생성 실패를 분리한다.
-  - 헤드라인 점수는 stability-runs '평균'.
-  - API 키를 사용하지 않는다.
+명령:
+  run    : 검색 → 3지표 계산 → report.md + report.results.json 생성
+  render : 결과 캐시(report.results.json)로부터 report.md 만 재생성
+
+지표:
+  - 핵심사실 커버리지: 문항별 key_facts(알리아스 목록)를 정규화 부분문자열로
+    검색 컨텍스트에 매칭한다. 헤드라인은 마이크로 평균.
+  - 문서 재현율: reference_notes 대비 회수된 문서 비율.
+  - 의미론적 일관성: 변형 질의로 검색했을 때 원 질의에서 회수된 사실의 보존율.
+
+  API 키/LLM/네트워크(검색 어댑터 제외)/무작위 요소가 없으므로,
+  어떤 에이전트 환경에서 돌려도 동일한 숫자가 나온다.
 """
 
 import os
@@ -305,6 +305,7 @@ def dump_results_cache(results, summary, engine, path, generated_at=None):
         os.makedirs(parent, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
+        f.write("\n")
     print(f"💾 결과 캐시를 저장했습니다 (render 재현용): {path}", file=sys.stderr)
 
 
@@ -349,7 +350,7 @@ def main():
     p.add_argument("--output", help="보고서 경로 (기본 engines/<engine>/report.md)")
     p.set_defaults(func=cmd_run)
 
-    r = sub.add_parser("render", help="채점 결과 캐시(report.results.json)로부터 보고서만 재생성")
+    r = sub.add_parser("render", help="측정 결과 캐시(report.results.json)로부터 보고서만 재생성")
     r.add_argument("source", help="report.results.json 경로")
     r.add_argument("--output", help="보고서 경로 (기본 캐시와 같은 폴더의 report.md)")
     r.set_defaults(func=cmd_render)
