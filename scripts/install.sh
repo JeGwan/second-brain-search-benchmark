@@ -155,5 +155,6 @@ _info "2. Add an engine adapter: create engines/<your_engine>/search.py"
 _info "   (contract: takes a query arg, prints retrieved context to stdout)."
 _info "   See engines/README.md for the full adapter contract + example."
 _info "3. Call your agent with: /sbse-bench <your_engine>"
+_info "   (or run directly: python3 evaluator.py run --engine <your_engine>)"
 _blank
-_info "This benchmark is engine-agnostic — bring your own engine adapter."
+_info "This benchmark is engine-agnostic and deterministic — same engine, same numbers in any environment."
