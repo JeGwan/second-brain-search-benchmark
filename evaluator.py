@@ -90,6 +90,9 @@ def llm_grade(question_data, answer, api_key, provider):
 You are an expert AI evaluator assessing the quality of a Second Brain Search Engine's answer.
 Analyze the candidate answer based on the Question, Ground Truth, and Rubric.
 
+[CRITICAL EVALUATION RULE - Precision (No Hallucination)]
+Even if the candidate answer contains correct key facts, if it includes any false facts, fabrications, or claims not supported by the context (hallucinations), you MUST deduct 1 point from the final score. The minimum possible score is 1.
+
 [Question]
 {question_data['question']}
 
@@ -105,7 +108,7 @@ Analyze the candidate answer based on the Question, Ground Truth, and Rubric.
 Evaluate the candidate answer and provide your judgment strictly in the following JSON format:
 {{
   "score": <int: 1, 2, or 3>,
-  "reason": "<string: concise explanation in Korean why this score was given based on the rubric>"
+  "reason": "<string: concise explanation in Korean why this score was given based on the rubric, including any deductions for hallucinations>"
 }}
 Response must be valid JSON only. Do not wrap in markdown or backticks.
 """
@@ -120,6 +123,9 @@ def get_agent_graded(q, answer):
 제시된 질문, 정답(Ground Truth), 채점 루브릭을 보고 후보 답변(Candidate Answer)을 평가하세요.
 반드시 루브릭 기준만을 준수하여 1점, 2점, 혹은 3점으로 채점하고 그 이유를 작성해 주세요.
 
+[중요 채점 규정 - 정밀도(Precision) 감점제]
+후보 답변이 필수 정보를 포함하고 있더라도, 제시된 컨텍스트에 없는 거짓 내용(환각), 과도한 왜곡, 혹은 질문과 무관한 허위 주장을 포함하고 있다면 최종 점수에서 1점을 감점해야 합니다. (단, 최저 점수는 1점입니다.)
+
 질문: {q['question']}
 정답: {q['ground_truth']}
 
@@ -133,7 +139,7 @@ def get_agent_graded(q, answer):
 반드시 아래 JSON 형식만 정확히 반환하세요. 다른 서두나 백틱(```json) 마크다운은 포함하지 마세요.
 {{
   "score": <점수: 1, 2, 또는 3>,
-  "reason": "<한글 채점 사유>"
+  "reason": "<한글 채점 사유, 감점 여부 포함>"
 }}
 """
     print("=== SUBAGENT_PROMPT_START ===")
@@ -143,7 +149,12 @@ def get_agent_graded(q, answer):
     
     # 에이전트로부터 채점 결과(JSON)를 stdin으로 읽음
     lines = []
-    for line in sys.stdin:
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            print("DEBUG Grader: EOF reached", file=sys.stderr)
+            break
+        print(f"DEBUG Grader: read line: {line.strip()}", file=sys.stderr)
         # 종료 감지 (빈 라인이거나 단일 JSON 완성 시 종료)
         lines.append(line)
         try:
@@ -228,7 +239,14 @@ def get_agent_answer(q, context):
     
     # 에이전트로부터 답변을 stdin으로 읽음
     lines = []
-    for line in sys.stdin:
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            print("DEBUG Answer: EOF reached", file=sys.stderr)
+            break
+        print(f"DEBUG Answer: read line: {line.strip()}", file=sys.stderr)
+        if line.strip() == "=== SUBAGENT_ANSWER_END ===":
+            break
         # 특정 종료 시그널 대신 EOF나 파이프가 끊길 때까지 읽음
         lines.append(line)
         
@@ -239,9 +257,14 @@ def generate_report(results, summary, output_path):
 
 ## 1. 종합 요약 (Summary)
 *   **평가 일시**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-*   **전체 점수**: **{summary['total_score']}** / {summary['max_score']} (달성도: **{summary['percentage']:.1f}%**)
+*   **기본 RAG 점수**: **{summary['total_score']}** / {summary['max_score']} (달성도: **{summary['percentage']:.1f}%**)
 *   **평가 방식**: {summary['eval_method']}
-
+*   **결정론적 일관성 (Stability Runs)**: {summary['stability_runs']}회 실행
+"""
+    if summary['stability_runs'] > 1:
+        report_md += f"*   **평균 안정성 (Average Stability StdDev)**: {summary['avg_stability_std']:.3f} (낮을수록 우수)\n"
+    
+    report_md += f"""
 ## 2. 평가 영역별 요약 (Scores by Axis)
 | 평가 영역 | 질문 수 | 획득 점수 | 만점 | 백분율 |
 | :--- | :---: | :---: | :---: | :---: |
@@ -251,22 +274,60 @@ def generate_report(results, summary, output_path):
         report_md += f"| {axis} | {data['count']} | {data['score']} | {data['max']} | {pct:.1f}% |\n"
         
     report_md += """
-## 3. 문항별 세부 결과 (Detailed Results)
+## 3. 일관성 및 신뢰성 상세 분석 (Consistency & Reliability Analysis)
+
+### 🔹 의미론적 일관성 (Semantic Robustness)
+질문 표현 변화(Paraphrasing)에 대해 RAG 시스템이 얼마나 일관된 답변을 제공하는지 평가합니다.
+| 문항 ID | 본 질문 점수 | 변형 질문 평균 점수 | 점수 일치도 (Robustness %) |
+| :---: | :---: | :---: | :---: |
+"""
+    has_semantic = False
+    for r in results:
+        if r.get("paraphrased_results") is not None:
+            has_semantic = True
+            report_md += f"| {r['id']} | {r['score']}점 | {r['semantic_avg']:.1f}점 | {r['semantic_robustness_pct']:.1f}% |\n"
+    if not has_semantic:
+        report_md += "| - | - | - | 변형 질문이 포함된 문항이 없습니다. |\n"
+
+    if summary['stability_runs'] > 1:
+        report_md += """
+### 🔹 결정론적 일관성 (Deterministic Stability)
+동일 질문을 반복 실행했을 때 점수의 변동성(표준편차)을 통해 검색 및 생성 안정성을 평가합니다.
+| 문항 ID | 평균 점수 | 표준편차 (StdDev) | 안정성 평가 |
+| :---: | :---: | :---: | :---: |
+"""
+        for r in results:
+            stability_status = "🟢 안정" if r['stability_std'] < 0.3 else ("🟡 보통" if r['stability_std'] < 0.7 else "🔴 불안정")
+            report_md += f"| {r['id']} | {r['stability_mean']:.2f}점 | {r['stability_std']:.3f} | {stability_status} |\n"
+
+    report_md += """
+## 4. 문항별 세부 결과 (Detailed Results)
 """
     for r in results:
         report_md += f"""
 ### 📝 {r['id']} ({r['axis']})
 *   **질문**: {r['question']}
 *   **정답 (Ground Truth)**: {r['ground_truth']}
-*   **엔진 답변**: 
+*   **기본 답변**: 
     > {r['answer'].replace(chr(10), chr(10) + '> ')}
 *   **채점 결과**: **{r['score']}점** / 3점
 *   **평가 의견**: {r['reason']}
-
----
 """
+        if r.get("paraphrased_results"):
+            report_md += "\n*   **의미론적 일관성 변형 질문 테스트**:\n"
+            for p_idx, pr in enumerate(r["paraphrased_results"]):
+                report_md += f"    *   *변형 {p_idx+1}*: \"{pr['q_text']}\"\n"
+                report_md += f"        *   **점수**: {pr['score']}점 / **평가의견**: {pr['reason']}\n"
+                report_md += f"        *   **답변**: {pr['answer']}\n"
+                
+        if len(r.get("all_runs", [])) > 1:
+            report_md += "\n*   **결정론적 일관성 반복 런 테스트**:\n"
+            for run in r["all_runs"]:
+                report_md += f"    *   *런 {run['run_idx']}*: 점수 {run['score']}점 | 의견: {run['reason']}\n"
+                
+        report_md += "\n---\n"
+        
     try:
-        # 상위 폴더가 존재하지 않으면 생성
         parent_dir = os.path.dirname(output_path)
         if parent_dir and not os.path.exists(parent_dir):
             os.makedirs(parent_dir, exist_ok=True)
@@ -286,6 +347,7 @@ def main():
     parser.add_argument("--provider", default="gemini", choices=["gemini", "openai"], help="자동 채점에 사용할 LLM 제공자 (기본값: gemini)")
     parser.add_argument("--api-key", help="LLM API 키 (환경 변수 GEMINI_API_KEY 또는 OPENAI_API_KEY도 가능)")
     parser.add_argument("--interactive-agent", action="store_true", help="API 키 없이 에이전트와 대화식 격리 환경(Subagent)으로 답변 및 채점 수행")
+    parser.add_argument("--stability-runs", type=int, default=1, help="결정론적 일관성 측정을 위해 각 질문을 반복 실행할 횟수")
     
     args = parser.parse_args()
     
@@ -325,6 +387,18 @@ def main():
     max_score = len(questions) * 3
     axis_scores = {}
     
+    import math
+    def calc_stats(scores):
+        n = len(scores)
+        if n == 0:
+            return 0.0, 0.0
+        mean = sum(scores) / n
+        var = sum((x - mean) ** 2 for x in scores) / n
+        std = math.sqrt(var)
+        return mean, std
+
+    total_stability_stds = []
+
     for q in questions:
         q_id = q["id"]
         axis = q["axis"]
@@ -335,69 +409,130 @@ def main():
         axis_scores[axis]["max"] += 3
         axis_scores[axis]["count"] += 1
         
-        # 답변 획득
-        answer = ""
-        if q_id in answers_dict:
-            answer = answers_dict[q_id]
-        else:
-            # 1단계: 엔진 검색 수행
-            print(f"🔍 [{q_id}] {args.engine} 검색 엔진으로 컨텍스트 조회 중...", file=sys.stderr)
-            context = run_engine_search(args.engine, q["question"])
+        # 실행할 서브 테스트 생성
+        sub_tests = []
+        sub_tests.append({"q_text": q["question"], "type": "original", "key": q_id})
+        for idx, pq in enumerate(q.get("paraphrased_questions", [])):
+            sub_tests.append({"q_text": pq, "type": "paraphrased", "key": f"{q_id}_para{idx+1}"})
             
-            # 2단계: 답변 생성
-            if args.interactive_agent:
-                # 에이전트 서브토픽 격리 방식으로 답변 수집
-                answer = get_agent_answer(q, context)
-            else:
-                # 일반 유저 터미널 직접 입력
-                print("\n" + "="*50, file=sys.stderr)
-                print(f"❓ [{q_id}] {q['question']}", file=sys.stderr)
-                print("="*50, file=sys.stderr)
-                print("엔진의 답변을 입력하세요. 입력이 끝나면 빈 줄에서 Ctrl+D를 누르세요:", file=sys.stderr)
-                lines = []
-                try:
-                    for line in sys.stdin:
-                        lines.append(line)
-                    answer = "".join(lines).strip()
-                except KeyboardInterrupt:
-                    print("\n👋 평가가 중단되었습니다.", file=sys.stderr)
-                    sys.exit(0)
-                    
-        if not answer:
-            print(f"⚠️ 경고: {q_id}번에 대한 답변이 비어있어 1점 처리됩니다.", file=sys.stderr)
-            score_data = {"score": 1, "reason": "답변이 제출되지 않았습니다."}
-        else:
-            # 3단계: 채점 진행
-            if args.interactive_agent:
-                # 에이전트 격리 채점 모드
-                score_data = get_agent_graded(q, answer)
-            elif api_key:
-                score_data = llm_grade(q, answer, api_key, args.provider)
-                if score_data is None:
-                    score_data = manual_grade(q, answer)
-            else:
-                score_data = manual_grade(q, answer)
-                
-        score = score_data["score"]
-        reason = score_data["reason"]
+        sub_test_results = []
         
+        for st in sub_tests:
+            st_key = st["key"]
+            st_runs = []
+            
+            for run_idx in range(args.stability_runs):
+                run_key = f"{st_key}_run{run_idx+1}" if args.stability_runs > 1 else st_key
+                
+                # 답변 획득
+                answer = ""
+                if run_key in answers_dict:
+                    answer = answers_dict[run_key]
+                else:
+                    # 1단계: RAG 검색 엔진 실행
+                    print(f"🔍 [{q_id}] ({st['type']}) Run {run_idx+1}/{args.stability_runs} - {args.engine} 검색 엔진으로 컨텍스트 조회...", file=sys.stderr)
+                    context = run_engine_search(args.engine, st["q_text"])
+                    
+                    # 2단계: 답변 생성
+                    q_temp = q.copy()
+                    q_temp["question"] = st["q_text"]
+                    
+                    if args.interactive_agent:
+                        answer = get_agent_answer(q_temp, context)
+                    else:
+                        print("\n" + "="*50, file=sys.stderr)
+                        print(f"❓ [{q_id}] ({st['type']} - Run {run_idx+1}) {st['q_text']}", file=sys.stderr)
+                        print("="*50, file=sys.stderr)
+                        print("엔진의 답변을 입력하세요. 입력이 끝나면 빈 줄에서 Ctrl+D를 누르세요:", file=sys.stderr)
+                        lines = []
+                        try:
+                            for line in sys.stdin:
+                                lines.append(line)
+                            answer = "".join(lines).strip()
+                        except KeyboardInterrupt:
+                            print("\n👋 평가가 중단되었습니다.", file=sys.stderr)
+                            sys.exit(0)
+                            
+                if not answer:
+                    score_data = {"score": 1, "reason": "답변이 제출되지 않았습니다."}
+                else:
+                    # 3단계: 채점 진행
+                    q_eval = q.copy()
+                    q_eval["question"] = st["q_text"]
+                    
+                    if args.interactive_agent:
+                        score_data = get_agent_graded(q_eval, answer)
+                    elif api_key:
+                        score_data = llm_grade(q_eval, answer, api_key, args.provider)
+                        if score_data is None:
+                            score_data = manual_grade(q_eval, answer)
+                    else:
+                        score_data = manual_grade(q_eval, answer)
+                        
+                st_runs.append({
+                    "run_idx": run_idx + 1,
+                    "answer": answer,
+                    "score": score_data["score"],
+                    "reason": score_data["reason"]
+                })
+                
+                if not args.answers:
+                    answers_dict[run_key] = answer
+                    
+            sub_test_results.append({
+                "q_text": st["q_text"],
+                "type": st["type"],
+                "runs": st_runs
+            })
+            
+        # 본 질문의 1차 런 결과를 해당 문항의 기본 점수로 활용
+        orig_runs = [r for r in sub_test_results if r["type"] == "original"][0]["runs"]
+        base_score = orig_runs[0]["score"]
+        base_reason = orig_runs[0]["reason"]
+        base_answer = orig_runs[0]["answer"]
+        
+        # 결정론적 일관성 계산 (본 질문 반복)
+        orig_scores = [r["score"] for r in orig_runs]
+        orig_mean, orig_std = calc_stats(orig_scores)
+        total_stability_stds.append(orig_std)
+        
+        # 의미론적 일관성 계산 (변형 질문들과 본 질문 1차 런 비교)
+        para_results = [r for r in sub_test_results if r["type"] == "paraphrased"]
+        para_scores = [base_score] + [r["runs"][0]["score"] for r in para_results]
+        para_mean, para_std = calc_stats(para_scores)
+        
+        matches = sum(1 for s in para_scores if s == base_score)
+        semantic_robustness_pct = (matches / len(para_scores)) * 100 if len(para_scores) > 0 else 100.0
+        
+        # paraphrased 결과 기록 포맷
+        para_formatted = []
+        for pr in para_results:
+            para_formatted.append({
+                "q_text": pr["q_text"],
+                "score": pr["runs"][0]["score"],
+                "reason": pr["runs"][0]["reason"],
+                "answer": pr["runs"][0]["answer"]
+            })
+            
         results.append({
             "id": q_id,
             "axis": axis,
             "question": q["question"],
             "ground_truth": q["ground_truth"],
-            "answer": answer,
-            "score": score,
-            "reason": reason
+            "answer": base_answer,
+            "score": base_score,
+            "reason": base_reason,
+            "all_runs": orig_runs if len(orig_runs) > 1 else [],
+            "stability_mean": orig_mean,
+            "stability_std": orig_std,
+            "paraphrased_results": para_formatted if len(para_formatted) > 0 else None,
+            "semantic_avg": para_mean,
+            "semantic_robustness_pct": semantic_robustness_pct
         })
         
-        total_score += score
-        axis_scores[axis]["score"] += score
+        total_score += base_score
+        axis_scores[axis]["score"] += base_score
         
-        # 중간 저장 (중간 중단 대비)
-        if not args.answers:
-            answers_dict[q_id] = answer
-            
     # 생성된 답변 캐싱 저장 (새로운 벤치마크 수행 시)
     if not args.answers and args.engine:
         answers_save_path = f"engines/{args.engine}/answers.json"
@@ -410,12 +545,15 @@ def main():
             
     # 5. 요약 통계 작성
     percentage = (total_score / max_score) * 100 if max_score > 0 else 0
+    avg_stability_std = sum(total_stability_stds) / len(total_stability_stds) if total_stability_stds else 0.0
     summary = {
         "total_score": total_score,
         "max_score": max_score,
         "percentage": percentage,
         "eval_method": eval_method,
-        "axis_scores": axis_scores
+        "axis_scores": axis_scores,
+        "stability_runs": args.stability_runs,
+        "avg_stability_std": avg_stability_std
     }
     
     # 6. 보고서 생성
