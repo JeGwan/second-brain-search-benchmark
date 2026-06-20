@@ -48,18 +48,6 @@ def normalize(text):
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
-# 격리 컨텍스트에서 제거할 로컬 절대경로/파일 URI 패턴 (정보 누수 차단)
-_PATH_LEAK_PATTERNS = [
-    re.compile(r"file://[^\s)\]]+"),
-    re.compile(r"/Users/[^\s)\]]+"),
-    re.compile(r"/home/[^\s)\]]+"),
-    re.compile(r"[A-Za-z]:\\\\[^\s)\]]+"),
-    re.compile(r"\.agents/[^\s)\]]+"),
-    re.compile(r"\.claude/[^\s)\]]+"),
-    re.compile(r"\.gemini/[^\s)\]]+"),
-]
-
-
 def load_questions(path):
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -70,84 +58,6 @@ def load_questions(path):
     except json.JSONDecodeError:
         print(f"❌ 에러: 질문지 파일이 올바른 JSON 형식이 아닙니다. 경로: {path}", file=sys.stderr)
         sys.exit(1)
-
-
-# ---------------------------------------------------------------------------
-# 프롬프트 단일 소스 (Single source of truth)
-# ---------------------------------------------------------------------------
-
-def build_answer_prompt(question_text, context):
-    """답변 생성 프롬프트. 격리 답변 서브에이전트에 그대로 전달한다."""
-    return f"""[답변 지시사항]
-제시된 컨텍스트(Retrieved Context)만을 바탕으로 질문에 한국어로 정확하게 답변하세요.
-절대로 외부 지식이나 상상력을 이용해 지어내거나(환각), 무리하게 추론하지 마세요.
-제시된 컨텍스트에 정보가 부족하다면, 어떤 정보가 누락되어 답변할 수 없는지 구체적으로 기술하세요.
-파일 경로나 시스템 위치를 추측해서 적지 마세요. 어떤 도구도 사용하지 말고 오직 답변 텍스트만 출력하세요.
-
-[질문]
-{question_text}
-
-[검색된 컨텍스트]
-{context}
-"""
-
-
-def build_grade_prompt(question_text, ground_truth, rubric_str, answer, context):
-    """채점 프롬프트. 환각 판정은 '제시된 컨텍스트' 기준으로만 이루어진다."""
-    if context and context.strip():
-        precision_rule = (
-            "[중요 채점 규정 - 정밀도(Precision) 감점제]\n"
-            "환각 판정은 반드시 아래 '검색된 컨텍스트'를 기준으로 합니다. "
-            "후보 답변이 '검색된 컨텍스트'에 근거가 있는 내용을 기술했다면, 그것이 "
-            "정답(Ground Truth)과 다소 다르더라도 환각으로 보지 않습니다. 반대로 "
-            "후보 답변이 '검색된 컨텍스트'에 전혀 근거가 없는 내용을 사실처럼 지어냈다면 "
-            "(컨텍스트에 없는 수치/이름/관계 등) 최종 점수에서 1점을 감점합니다. "
-            "(단, 최저 점수는 1점입니다.)\n"
-            "주의: 컨텍스트에 정보가 없어서 '답변할 수 없다/누락되었다'고 정직하게 "
-            "기술한 것은 환각이 아니며 감점하지 않습니다.\n\n"
-            f"[검색된 컨텍스트 — 환각 판정의 유일한 근거]\n{context}\n"
-        )
-    else:
-        precision_rule = (
-            "[중요 채점 규정 - 정밀도(Precision) 감점제]\n"
-            "(이 채점에는 검색 컨텍스트가 제공되지 않았습니다. 따라서 환각 판정은 "
-            "정답(Ground Truth) 및 일반 상식 기준으로만 보수적으로 적용합니다.)\n"
-            "후보 답변이 정답과 명백히 상반되는 거짓 사실을 단정적으로 지어낸 경우에만 "
-            "1점을 감점합니다. (단, 최저 점수는 1점입니다.)\n"
-        )
-
-    return f"""[채점 지시사항]
-제시된 질문, 정답(Ground Truth), 채점 루브릭을 보고 후보 답변(Candidate Answer)을 평가하세요.
-반드시 루브릭 기준만을 준수하여 1점, 2점, 혹은 3점으로 채점하고 그 이유를 작성해 주세요.
-어떤 도구도 사용하지 말고, 아래 JSON 형식만 출력하세요.
-
-{precision_rule}
-질문: {question_text}
-정답: {ground_truth}
-
-루브릭:
-{rubric_str}
-
-후보 답변:
-{answer}
-
-출력 형식 (다른 서두나 백틱 없이 이 JSON 만):
-{{"score": <1|2|3>, "reason": "<한글 채점 사유, 감점 여부 포함>"}}
-"""
-
-
-def rubric_to_str(rubric):
-    return "\n".join([f"- {score}점: {desc}" for score, desc in rubric.items()])
-
-
-def sanitize_context(context):
-    """검색 컨텍스트에서 로컬 경로/파일 URI 등 누수 가능 정보를 마스킹한다."""
-    if not context:
-        return context
-    cleaned = context
-    for pat in _PATH_LEAK_PATTERNS:
-        cleaned = pat.sub("[경로 제거됨]", cleaned)
-    return cleaned
 
 
 def compute_retrieval_recall(context, reference_notes):
@@ -217,46 +127,84 @@ def run_engine_search(engine, query):
 
 
 # ---------------------------------------------------------------------------
-# 통계 / 집계
+# 집계 / 실행
 # ---------------------------------------------------------------------------
 
-def calc_stats(scores):
-    n = len(scores)
-    if n == 0:
-        return 0.0, 0.0
-    mean = sum(scores) / n
-    return mean, math.sqrt(sum((x - mean) ** 2 for x in scores) / n)
-
-
-def summarize(results, stability_runs, eval_method, answer_source):
+def summarize(results):
+    total_facts = sum(r["n_facts"] for r in results)
+    total_found = sum(r["n_found"] for r in results)
+    recalls = [r["retrieval_recall"] for r in results if r.get("retrieval_recall") is not None]
+    consis = [r["semantic_consistency"] for r in results if r.get("semantic_consistency") is not None]
     axis_scores = {}
-    total_score = 0.0
-    stds, recalls = [], []
     for r in results:
-        a = axis_scores.setdefault(r["axis"], {"score": 0.0, "max": 0, "count": 0})
-        a["score"] += r["score"]
-        a["max"] += 3
-        a["count"] += 1
-        total_score += r["score"]
-        stds.append(r["stability_std"])
-        if r.get("retrieval_recall") is not None:
-            recalls.append(r["retrieval_recall"])
-    max_score = len(results) * 3
+        a = axis_scores.setdefault(r["axis"], {"found": 0, "facts": 0})
+        a["found"] += r["n_found"]
+        a["facts"] += r["n_facts"]
     return {
-        "total_score": total_score,
-        "max_score": max_score,
-        "percentage": (total_score / max_score) * 100 if max_score else 0.0,
-        "eval_method": eval_method,
-        "answer_source": answer_source,
+        "total_facts": total_facts,
+        "total_found": total_found,
+        "micro_coverage": (total_found / total_facts) if total_facts else 0.0,
+        "avg_retrieval_recall": (sum(recalls) / len(recalls)) if recalls else None,
+        "avg_semantic_consistency": (sum(consis) / len(consis)) if consis else None,
         "axis_scores": axis_scores,
-        "stability_runs": stability_runs,
-        "avg_stability_std": sum(stds) / len(stds) if stds else 0.0,
-        "avg_retrieval_recall": sum(recalls) / len(recalls) if recalls else None,
     }
 
 
+def build_results(questions, engine):
+    results = []
+    for q in questions:
+        qid = q["id"]
+        key_facts = q.get("key_facts", [])
+        print(f"🔍 [{qid}] {engine} 검색 (원 질의)...", file=sys.stderr)
+        ctx = run_engine_search(engine, q["question"])
+        coverage, facts = compute_keyfact_coverage(ctx, key_facts)
+        recall, missing = compute_retrieval_recall(ctx, q.get("reference_notes", []))
+        orig_found = {f["label"] for f in facts if f["found"]}
+
+        paraphrased = []
+        para_found_sets = []
+        for pq in q.get("paraphrased_questions", []):
+            print(f"🔍 [{qid}] {engine} 검색 (변형)...", file=sys.stderr)
+            pctx = run_engine_search(engine, pq)
+            pcov, pfacts = compute_keyfact_coverage(pctx, key_facts)
+            pset = {f["label"] for f in pfacts if f["found"]}
+            para_found_sets.append(pset)
+            paraphrased.append({"q_text": pq, "coverage": pcov, "n_found": len(pset)})
+
+        consistency = compute_semantic_consistency(orig_found, para_found_sets)
+        n_found = sum(1 for f in facts if f["found"])
+        results.append({
+            "id": qid,
+            "axis": q["axis"],
+            "question": q["question"],
+            "ground_truth": q.get("ground_truth", ""),
+            "reference_notes": q.get("reference_notes", []),
+            "key_facts": facts,
+            "n_facts": len(key_facts),
+            "n_found": n_found,
+            "key_fact_coverage": coverage if coverage is not None else 0.0,
+            "retrieval_recall": recall,
+            "retrieval_missing": missing,
+            "semantic_consistency": consistency,
+            "paraphrased": paraphrased,
+        })
+    return results
+
+
+def cmd_run(args):
+    questions = load_questions(args.questions)
+    results = build_results(questions, args.engine)
+    summary = summarize(results)
+    output = args.output or f"engines/{args.engine}/report.md"
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    generate_report(results, summary, output, args.engine, generated_at=generated_at)
+    cache_path = f"{os.path.splitext(output)[0]}.results.json"
+    dump_results_cache(results, summary, args.engine, cache_path, generated_at=generated_at)
+    print_cli_summary(summary)
+
+
 # ---------------------------------------------------------------------------
-# 보고서 렌더링
+# 보고서 렌더링 (Task 6 에서 재작성 예정)
 # ---------------------------------------------------------------------------
 
 def generate_report(results, summary, output_path, generated_at=None):
@@ -388,209 +336,6 @@ def dump_results_cache(results, summary, path, generated_at=None):
     print(f"💾 채점 결과 캐시를 저장했습니다 (재현용): {path}", file=sys.stderr)
 
 
-def print_cli_summary(summary):
-    print("\n" + "=" * 40, file=sys.stderr)
-    print("📊 벤치마크 평가 결과 요약", file=sys.stderr)
-    print(f"- 총점(평균): {summary['total_score']:.1f} / {summary['max_score']} ({summary['percentage']:.1f}%)", file=sys.stderr)
-    if summary.get("avg_retrieval_recall") is not None:
-        print(f"- 평균 검색 재현율: {summary['avg_retrieval_recall'] * 100:.1f}%", file=sys.stderr)
-    for axis, data in summary["axis_scores"].items():
-        pct = (data["score"] / data["max"]) * 100 if data["max"] else 0
-        print(f"  * {axis}: {data['score']:.1f} / {data['max']} ({pct:.1f}%)", file=sys.stderr)
-    print("=" * 40, file=sys.stderr)
-
-
-# ---------------------------------------------------------------------------
-# run.json 입출력
-# ---------------------------------------------------------------------------
-
-def run_file_path(args):
-    if args.run_file:
-        return args.run_file
-    if args.engine:
-        return f"engines/{args.engine}/run.json"
-    print("❌ 에러: --engine 또는 --run-file 이 필요합니다.", file=sys.stderr)
-    sys.exit(1)
-
-
-def load_run(path):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        print(f"❌ 에러: 작업 파일을 찾을 수 없습니다: {path} (먼저 prepare 를 실행하세요)", file=sys.stderr)
-        sys.exit(1)
-
-
-def save_run(run, path):
-    parent = os.path.dirname(path)
-    if parent and not os.path.exists(parent):
-        os.makedirs(parent, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(run, f, ensure_ascii=False, indent=2)
-
-
-# ---------------------------------------------------------------------------
-# 1) prepare
-# ---------------------------------------------------------------------------
-
-def cmd_prepare(args):
-    questions = load_questions(args.questions)
-    path = run_file_path(args)
-    items = []
-    for q in questions:
-        qid = q["id"]
-        sub_tests = [{"key": qid, "type": "original", "text": q["question"]}]
-        for idx, pq in enumerate(q.get("paraphrased_questions", [])):
-            sub_tests.append({"key": f"{qid}_para{idx + 1}", "type": "paraphrased", "text": pq})
-        for st in sub_tests:
-            print(f"🔍 [{qid}] ({st['type']}) {args.engine} 검색...", file=sys.stderr)
-            context = sanitize_context(run_engine_search(args.engine, st["text"]))
-            recall, missing = compute_retrieval_recall(context, q.get("reference_notes", []))
-            for run_idx in range(1, args.stability_runs + 1):
-                items.append({
-                    "key": f"{st['key']}_run{run_idx}" if args.stability_runs > 1 else st["key"],
-                    "qid": qid,
-                    "type": st["type"],
-                    "run_idx": run_idx,
-                    "question": st["text"],
-                    "original_question": q["question"],
-                    "axis": q["axis"],
-                    "ground_truth": q["ground_truth"],
-                    "reference_notes": q.get("reference_notes", []),
-                    "rubric": q["evaluation_rubric"],
-                    "context": context,
-                    "retrieval_recall": recall,
-                    "retrieval_missing": missing,
-                    "answer_prompt": build_answer_prompt(st["text"], context),
-                    "answer": None,
-                    "grade_prompt": None,
-                    "score": None,
-                    "reason": None,
-                })
-    run = {
-        "meta": {
-            "engine": args.engine,
-            "stability_runs": args.stability_runs,
-            "questions_path": args.questions,
-            "answer_source": args.answer_source or f"{args.engine} 검색 + 격리 답변 생성",
-        },
-        "items": items,
-    }
-    save_run(run, path)
-    n_ans = len(items)
-    print(f"\n✅ prepare 완료: {path} ({n_ans}개 항목)", file=sys.stderr)
-    print("다음 단계: 각 항목의 'answer_prompt' 로 격리 답변 서브에이전트를 띄워 'answer' 를 채운 뒤,", file=sys.stderr)
-    print("           grade-prompts 를 실행하세요. (SKILL.md 참고)", file=sys.stderr)
-
-
-# ---------------------------------------------------------------------------
-# 3) grade-prompts
-# ---------------------------------------------------------------------------
-
-def cmd_grade_prompts(args):
-    path = run_file_path(args)
-    run = load_run(path)
-    missing_ans = [it["key"] for it in run["items"] if not it.get("answer")]
-    if missing_ans:
-        print(f"❌ 에러: 아직 답변(answer)이 없는 항목이 있습니다: {missing_ans}", file=sys.stderr)
-        print("   모든 항목에 격리 답변 서브에이전트 결과를 채운 뒤 다시 실행하세요.", file=sys.stderr)
-        sys.exit(1)
-    for it in run["items"]:
-        it["grade_prompt"] = build_grade_prompt(
-            it["question"], it["ground_truth"], rubric_to_str(it["rubric"]), it["answer"], it.get("context") or "")
-    save_run(run, path)
-    print(f"✅ grade-prompts 완료: {path} ({len(run['items'])}개 채점 프롬프트 생성)", file=sys.stderr)
-    print("다음 단계: 각 항목의 'grade_prompt' 로 격리 채점 서브에이전트를 띄워 'score'/'reason' 을 채운 뒤,", file=sys.stderr)
-    print("           assemble 을 실행하세요.", file=sys.stderr)
-
-
-# ---------------------------------------------------------------------------
-# 5) assemble
-# ---------------------------------------------------------------------------
-
-def cmd_assemble(args):
-    path = run_file_path(args)
-    run = load_run(path)
-    items = run["items"]
-    ungraded = [it["key"] for it in items if it.get("score") is None]
-    if ungraded:
-        print(f"❌ 에러: 아직 채점(score)이 없는 항목이 있습니다: {ungraded}", file=sys.stderr)
-        sys.exit(1)
-
-    meta = run.get("meta", {})
-    stability_runs = meta.get("stability_runs", 1)
-
-    # qid 순서 보존
-    order = []
-    by_qid = {}
-    for it in items:
-        if it["qid"] not in by_qid:
-            by_qid[it["qid"]] = []
-            order.append(it["qid"])
-        by_qid[it["qid"]].append(it)
-
-    results = []
-    for qid in order:
-        group = by_qid[qid]
-        originals = sorted([it for it in group if it["type"] == "original"], key=lambda x: x["run_idx"])
-        orig_scores = [it["score"] for it in originals]
-        omean, ostd = calc_stats(orig_scores)
-        base = originals[0]
-
-        recall_vals = [it["retrieval_recall"] for it in originals if it["retrieval_recall"] is not None]
-        q_recall = sum(recall_vals) / len(recall_vals) if recall_vals else None
-
-        # 변형 질문: 각 변형의 run1 점수
-        paras = {}
-        for it in group:
-            if it["type"] == "paraphrased":
-                paras.setdefault(it["qid"] + "|" + it["question"], []).append(it)
-        para_formatted, para_run1_scores = [], []
-        for key in sorted(paras.keys()):
-            runs = sorted(paras[key], key=lambda x: x["run_idx"])
-            r1 = runs[0]
-            para_run1_scores.append(r1["score"])
-            para_formatted.append({"q_text": r1["question"], "score": r1["score"],
-                                   "reason": r1["reason"], "answer": r1["answer"]})
-
-        base_round = round(omean)
-        pool = [base_round] + para_run1_scores
-        sem_pct = (sum(1 for s in pool if s == base_round) / len(pool)) * 100 if pool else 100.0
-        para_mean, _ = calc_stats([omean] + para_run1_scores)
-
-        results.append({
-            "id": qid,
-            "axis": base["axis"],
-            "question": base.get("original_question", base["question"]),
-            "ground_truth": base["ground_truth"],
-            "reference_notes": base.get("reference_notes", []),
-            "answer": base["answer"],
-            "score": omean,
-            "reason": base["reason"],
-            "all_runs": [{"run_idx": it["run_idx"], "answer": it["answer"],
-                          "score": it["score"], "reason": it["reason"]} for it in originals],
-            "stability_mean": omean,
-            "stability_std": ostd,
-            "retrieval_recall": q_recall,
-            "retrieval_missing": base.get("retrieval_missing"),
-            "paraphrased_results": para_formatted if para_formatted else None,
-            "semantic_avg": para_mean,
-            "semantic_robustness_pct": sem_pct,
-        })
-
-    eval_method = meta.get("eval_method", "에이전트 격리 채점 (서브에이전트 오케스트레이션)")
-    answer_source = meta.get("answer_source", "엔진 검색 + 격리 답변 생성")
-    summary = summarize(results, stability_runs, eval_method, answer_source)
-
-    output = args.output or (f"engines/{meta.get('engine')}/report.md" if meta.get("engine") else "benchmark_report.md")
-    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    generate_report(results, summary, output, generated_at=generated_at)
-    cache_path = f"{os.path.splitext(output)[0]}.results.json"
-    dump_results_cache(results, summary, cache_path, generated_at=generated_at)
-    print_cli_summary(summary)
-
-
 # ---------------------------------------------------------------------------
 # render (채점 결과 캐시 → 보고서)
 # ---------------------------------------------------------------------------
@@ -612,27 +357,14 @@ def cmd_render(args):
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="세컨드 브레인 검색 엔진 벤치마크 평가기 (대화형 프로토콜 없음)")
+    parser = argparse.ArgumentParser(description="세컨드 브레인 검색 엔진 벤치마크 평가기 (결정론적 검색 측정)")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("prepare", help="검색 실행 → run.json 에 컨텍스트/재현율/답변프롬프트 기록")
+    p = sub.add_parser("run", help="검색 실행 → 3지표 계산 → report.md + report.results.json")
     p.add_argument("--engine", required=True, help="대상 검색 엔진(어댑터 폴더) 이름")
     p.add_argument("--questions", default=DEFAULT_QUESTIONS_PATH)
-    p.add_argument("--stability-runs", type=int, default=1, help="각 질문 반복 실행 횟수(결정론적 일관성)")
-    p.add_argument("--run-file", help="작업 파일 경로 (기본 engines/<engine>/run.json)")
-    p.add_argument("--answer-source", help="보고서에 기록할 답변 출처 설명(예: 답변 모델명)")
-    p.set_defaults(func=cmd_prepare)
-
-    g = sub.add_parser("grade-prompts", help="답변을 받아 컨텍스트 포함 채점 프롬프트 생성")
-    g.add_argument("--engine")
-    g.add_argument("--run-file")
-    g.set_defaults(func=cmd_grade_prompts)
-
-    a = sub.add_parser("assemble", help="run.json 집계 → report.md + report.results.json")
-    a.add_argument("--engine")
-    a.add_argument("--run-file")
-    a.add_argument("--output", help="보고서 경로 (기본 engines/<engine>/report.md)")
-    a.set_defaults(func=cmd_assemble)
+    p.add_argument("--output", help="보고서 경로 (기본 engines/<engine>/report.md)")
+    p.set_defaults(func=cmd_run)
 
     r = sub.add_parser("render", help="채점 결과 캐시(report.results.json)로부터 보고서만 재생성")
     r.add_argument("source", help="report.results.json 경로")

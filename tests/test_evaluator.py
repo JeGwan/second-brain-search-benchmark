@@ -84,5 +84,24 @@ class TestQuestionsSchema(unittest.TestCase):
             self.assertNotIn("evaluation_rubric", q, q["id"])
 
 
+class TestSummarize(unittest.TestCase):
+    def test_micro_average_and_axis(self):
+        results = [
+            {"axis": "A", "n_facts": 2, "n_found": 2, "retrieval_recall": 1.0,
+             "semantic_consistency": 1.0},
+            {"axis": "A", "n_facts": 2, "n_found": 1, "retrieval_recall": 0.5,
+             "semantic_consistency": 0.5},
+            {"axis": "B", "n_facts": 1, "n_found": 0, "retrieval_recall": 0.0,
+             "semantic_consistency": None},
+        ]
+        s = evaluator.summarize(results)
+        self.assertEqual(s["total_facts"], 5)
+        self.assertEqual(s["total_found"], 3)
+        self.assertAlmostEqual(s["micro_coverage"], 3 / 5)
+        self.assertAlmostEqual(s["avg_retrieval_recall"], (1.0 + 0.5 + 0.0) / 3)
+        self.assertAlmostEqual(s["avg_semantic_consistency"], (1.0 + 0.5) / 2)
+        self.assertEqual(s["axis_scores"]["A"], {"found": 3, "facts": 4})
+
+
 if __name__ == "__main__":
     unittest.main()
