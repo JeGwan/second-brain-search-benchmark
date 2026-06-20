@@ -6,6 +6,9 @@ set -euo pipefail
 
 GITHUB_RAW_URL="https://raw.githubusercontent.com/JeGwan/second-brain-search-benchmark/main"
 
+# 벤치마크 코어는 '엔진-agnostic' 하다. 어떤 검색 엔진을 평가할지는 사용자의 선택이며,
+# 우리는 특정 엔진 어댑터를 제공하지 않는다. 대신 엔진 어댑터 작성 규약(contract)을
+# engines/README.md 로 안내한다. (qmd/no-engine 예제는 리포지토리에만 존재)
 CORE_FILES=(
   "evaluator.py"
   "questions.json"
@@ -14,6 +17,7 @@ CORE_FILES=(
   "second_brain/03_인사기록_및_조직도.md"
   "second_brain/04_사내_메신저_백업.md"
   "skills/sbse-bench/SKILL.md"
+  "engines/README.md"
 )
 
 # Color configurations
@@ -107,15 +111,16 @@ done
 # 4. Wire skills for runtimes
 _step "3/3 Wiring Agent Customization Skills"
 
-# Determine workspace root (looking for .git or README)
-VROOT="."
-for i in {1..3}; do
+# Determine workspace root (walk up looking for .git or README, max 3 levels)
+VROOT="$(pwd)"
+for _ in 1 2 3; do
   if [ -d "$VROOT/.git" ] || [ -f "$VROOT/README.md" ]; then
     break
   fi
-  VROOT=".."
+  parent="$(dirname "$VROOT")"
+  [ "$parent" = "$VROOT" ] && break  # reached filesystem root
+  VROOT="$parent"
 done
-VROOT=$(abspath "$VROOT" 2>/dev/null || cd "$VROOT" && pwd)
 
 # 4a. Install to workspace .agents/ (Standard for Gemini/Claude/Codex workspace config)
 WORKSPACE_SKILL_DIR="${VROOT}/.agents/skills/sbse-bench"
@@ -145,8 +150,10 @@ _blank
 _say "${GREEN}${BOLD}Done! SBSE-Bench installation completed successfully.${RESET}"
 _blank
 _say "${BOLD}How to run:${RESET}"
-_info "1. Index the 'second_brain/' directory in your search engine."
-_info "2. Call your agent with: /sbse-bench <engine_name>"
-_info "   Example: /sbse-bench qmd"
+_info "1. Index the 'second_brain/' directory in the search engine you want to test."
+_info "2. Add an engine adapter: create engines/<your_engine>/search.py"
+_info "   (contract: takes a query arg, prints retrieved context to stdout)."
+_info "   See engines/README.md for the full adapter contract + example."
+_info "3. Call your agent with: /sbse-bench <your_engine>"
 _blank
-_info "Enjoy benchmarking your Second Brain!"
+_info "This benchmark is engine-agnostic — bring your own engine adapter."

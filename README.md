@@ -15,37 +15,51 @@
 ```bash
 curl -fsSL https://raw.githubusercontent.com/JeGwan/second-brain-search-benchmark/main/scripts/install.sh | bash
 ```
-*이 스크립트는 로컬의 Python 3 환경을 체크하고, 벤치마크에 필요한 데이터셋을 다운로드하며, 현재 활성화된 에이전트 환경(Gemini, Claude, Codex)을 감지하여 적절한 폴더에 스킬(`SKILL.md`)을 자동 설치/등록합니다.*
+*이 스크립트는 로컬의 Python 3 환경을 체크하고, 벤치마크 코어(평가기·질문지·데이터셋·스킬·어댑터 규약)를 다운로드하며, 현재 활성화된 에이전트 환경(Gemini, Claude, Codex)을 감지하여 적절한 폴더에 스킬(`SKILL.md`)을 자동 설치/등록합니다.*
+
+### 2) 엔진 어댑터 (Bring Your Own Engine)
+SBSE-Bench는 **엔진-agnostic** 합니다. 평가는 `engines/<엔진이름>/search.py` 라는
+**고정된 검색 호출**을 통해 이루어집니다(이 고정이 결정론적 일관성·검색 재현율 측정의
+전제). 단, 사용자가 이 파일을 손으로 짤 필요는 없습니다.
+
+* **자동(권장)**: `/sbse-bench <엔진이름>` 을 호출하면 에이전트가 **0단계 어댑터
+  부트스트랩**을 수행합니다 — 엔진의 `--help`/문서/MCP 스펙을 조사해 규약에 맞는
+  `search.py` 를 1회 생성하고, 이후에는 그 파일을 고정 재사용합니다.
+* **수동**: 직접 작성하려면 규약을 따르세요. 위치 `engines/<엔진이름>/search.py`,
+  계약 = 질의를 `argv[1]` 로 받아 검색 컨텍스트를 **stdout** 출력(원본 문서명 포함 시
+  검색 재현율 측정에 유리). 자세한 규약·예시: [`engines/README.md`](engines/README.md).
+
+어느 경우든, 평가할 엔진에 `second_brain/` 을 색인합니다(엔진마다 방식이 다름).
 
 ---
 
-### 2) 에이전트별 구동 방법 (Running the Benchmark)
+### 3) 에이전트별 구동 방법 (Running the Benchmark)
+아래에서 `<engine>` 은 당신이 작성한 어댑터 폴더 이름입니다.
 
 #### 🔹 Antigravity (Gemini-based Agent)
 Antigravity CLI는 파일 구조 기반의 커스텀 **스킬(Skills)** 시스템을 기본 지원합니다.
-*   **스킬 호출**: 채팅창에 아래와 같이 입력하여 실행합니다.
-    ```
-    /sbse-bench qmd
-    ```
-    *또는 "sbse-bench 스킬로 qmd 벤치마크 수행해줘"라고 한글로 자유롭게 입력해도 동작합니다.*
+*   **스킬 호출**: 채팅창에 `/sbse-bench <engine>` 입력. (또는 "sbse-bench 스킬로 `<engine>` 벤치마크 수행해줘")
 
 #### 🔹 Claude Code (Anthropic CLI Agent)
-Claude Code는 터미널 실행에 특화되어 있으며, 쉘 명령어와의 연동이 매우 강력합니다.
 *   **구동 방법**: Claude Code 프롬프트에 직접 아래 가이드와 명령어를 입력합니다.
-    > "아래 명령어로 평가기를 구동하고, `=== SUBAGENT_PROMPT_START ===` 마커와 함께 질문이 제공되면 다른 문서를 직접 열지 말고(격리), 질문에 포함된 컨텍스트 정보만 참고하여 답변해줘."
-    
+    > "아래 명령어로 평가기를 구동하고, `=== SUBAGENT_PROMPT_START ===` 마커와 함께 질문이 제공되면 다른 문서를 직접 열지 말고(격리), 마커 사이 텍스트만 참고하여 답변해줘."
+
     ```bash
-    python3 evaluator.py --engine qmd --interactive-agent
+    python3 evaluator.py --engine <engine> --interactive-agent
+    # 보고서는 engines/<engine>/report.md 로 생성됩니다 (--output 으로 변경 가능).
     ```
 
 #### 🔹 Codex (OpenAI Developer Agent Framework)
-Codex 및 기타 개발자용 커스텀 에이전트 프레임워크 환경입니다.
-*   **구동 방법**: Codex가 횡령 문서를 직접 읽는 치팅을 쓰지 않도록 실행 프롬프트를 지정하여 구동합니다.
-    > "아래 명령어를 실행하고, `=== SUBAGENT_PROMPT` 마커가 감지되면 출력된 텍스트 범위 내에서만 100% 무맥락 격리 상태로 답변을 순차적으로 작성해서 stdin으로 입력해줘."
-    
+*   **구동 방법**: Codex가 원본 문서를 직접 읽는 치팅을 쓰지 않도록 실행 프롬프트를 지정하여 구동합니다.
+    > "아래 명령어를 실행하고, `=== SUBAGENT_PROMPT` 마커가 감지되면 출력된 마커 사이 텍스트 범위 내에서만 100% 무맥락 격리 상태로 답변을 작성해 stdin으로 입력해줘."
+
     ```bash
-    python3 evaluator.py --engine qmd --interactive-agent
+    python3 evaluator.py --engine <engine> --interactive-agent
+    # 보고서는 engines/<engine>/report.md 로 생성됩니다 (--output 으로 변경 가능).
     ```
+
+> LLM 비용 없이 채점 결과로 보고서만 다시 만들려면:
+> `python3 evaluator.py --from-results engines/<engine>/report.results.json`
 
 ---
 
@@ -104,44 +118,71 @@ graph TD
 2.  **무비용 채점 (Zero-Cost Grading)**:
     *   답변 생성이 완료되면, 다시 독립된 서브에이전트를 띄워 채점 루브릭에 따라 답변을 1~3점으로 매기고 그 이유를 JSON 포맷으로 평가기에 전달합니다.
     *   사용자는 어떠한 API 키도 발급받을 필요가 없으며, 에이전트의 월 구독 크레딧으로 벤치마크 전체 연산이 완결됩니다.
+3.  **컨텍스트 기반 채점 + 검색/생성 분리 (Context-grounded Grading)**:
+    *   채점기는 **검색된 컨텍스트를 함께 받아**, 환각(hallucination) 여부를 정답이 아니라 *제시된 컨텍스트* 기준으로 판정합니다. (컨텍스트에 없어서 "답변 불가"라고 정직하게 밝힌 것은 감점하지 않습니다.)
+    *   `reference_notes` 대비 **검색 재현율(Retrieval Recall)** 을 별도로 계산하여, 점수 하락의 책임이 *검색*인지 *생성/추론*인지 분리합니다.
+4.  **재현성 (Reproducibility)**:
+    *   헤드라인 점수는 반복 실행(stability-runs)의 **평균**이며, 채점 결과는 `*.results.json` 캐시로 저장되어 `--from-results` 로 LLM 없이 보고서를 재생성할 수 있습니다.
 
 ---
 
 ## 5. 공식 벤치마크 리더보드 (Leaderboard)
 
-| 순위 | 검색 엔진 (Engine) | 전체 점수 (Score) | 달성도 (%) | 평가 일자 (Date) | 상세 보고서 (Report) |
+헤드라인 점수는 stability-runs **평균**입니다. 표본이 작으므로(문항 5개) 소수점 차이는
+노이즈이며, 단일 순위보다 영역별 강약점·검색 재현율과 함께 해석해야 합니다.
+
+| 순위 | 검색 엔진 (Engine) | 전체 점수 (평균) | 달성도 (%) | 평가 일자 (Date) | 상세 보고서 (Report) |
 | :---: | :--- | :---: | :---: | :---: | :---: |
-| 🥇 | **QMD** (v2.5.3) | **13 / 15** | **86.7%** | 2026-06-20 | [보고서 보기](results/qmd_report.md) |
+| 🥇 | **QMD** † | **10.5 / 15** | **70.0%** | 2026-06-20 | [보고서 보기](engines/qmd/report.md) |
 | - | *다음 엔진 기여를 기다립니다!* | - | - | - | - |
 
-### QMD 주요 분석 피드백
-*   **강점**: BM25 + Vector 하이브리드 검색 능력 덕분에 `Q-01`, `Q-04`, `Q-05` 등 텍스트 키워드 및 의미 매칭 기반 지식 검색은 100% 완벽히 수행함.
-*   **보완점**: 다중 문서 간의 인물 직책과 날짜를 엮어야 하는 `Q-02`, `Q-03` 문항에서, 문서 본문 중 이름/날짜가 적힌 특정 영역이 검색 스니펫(Snippet) 크기 한계로 인해 누락되어 각각 2점에 그침. (스니펫 범위 확장이나 Chunk Size 조정을 통해 해결 가능할 것으로 보임)
+† **QMD 결과는 v3 방법론 *이전*의 채점 스냅샷**입니다(2회 실행 평균). 채점기가 검색
+컨텍스트를 보지 못한 상태에서 매긴 점수라, 신규(컨텍스트 기반) 채점기로의 **재평가가
+권장**됩니다. 상세는 보고서 상단 주석 참조.
+
+### QMD 주요 분석 피드백 (재생성된 보고서 기준)
+*   **강점**: 의미 매칭 기반 단일 사실 검색이 강함 — `Q-05`(Semantic Robustness) 평균 3.0/3 만점, `Q-01`(Fact Fidelity) 평균 2.5/3.
+*   **보완점/주의**:
+    *   `Q-03`(인과 추론)·`Q-04`(논리적 멀티홉)이 평균 1.5/3 로 낮음. 다만 이 점수에는 채점기가 검색 컨텍스트를 못 본 상태의 환각 감점(Q-01·Q-04)이 섞여 있어 **재평가가 필요**합니다.
+    *   `Q-01·Q-03·Q-04` 는 반복 실행 간 점수가 뒤집히는 **비결정성(std 0.5)** 을 보였습니다. 결정론적 안정성 개선이 필요합니다.
+    *   구버전은 top-3 검색(`-n 3`)을 사용해 4문서 코퍼스에서 1개 문서가 항상 탈락했습니다. 현재 어댑터 규약은 검색 N을 조정/측정할 수 있게 바뀌었으므로, 재평가 시 검색 재현율 표로 검색/생성 책임을 분리해 확인하세요.
 
 ---
 
 ## 6. 리포지토리 폴더 구조 (Directory Structure)
 
+설치 스크립트가 배포하는 **코어**(엔진-agnostic)와, 리포지토리에만 있는 **예제 엔진**을 구분합니다.
+
 ```
 second-brain-search-benchmark/
 ├── README.md               # 벤치마크 개요, 설치 및 실행 안내
-├── evaluator.py            # 공통 평가 채점 엔진 (RAG 질의 및 에이전트 인터랙티브 중계)
-├── questions.json          # 표준 벤치마크 평가 질문지 및 채점 루브릭 (5개 문항)
+├── evaluator.py            # 공통 평가 채점 엔진 (격리 답변/채점 중계, 검색 재현율, 보고서)
+├── questions.json          # 표준 평가 질문지 + 채점 루브릭 (5문항, 변형질문 포함)
 ├── second_brain/           # 표준 테스트 데이터셋 (비정형 마크다운 폴더)
 │   ├── 01_횡령의혹_내부감사보고서.md
 │   ├── 02_재무팀_비밀_장부.md
 │   ├── 03_인사기록_및_조직도.md
 │   └── 04_사내_메신저_백업.md
 ├── scripts/
-│   └── install.sh          # 에이전트 환경 자동 감지 및 통합 설치 스크립트
+│   └── install.sh          # 에이전트 환경 자동 감지 및 코어 설치 스크립트
 ├── skills/
 │   └── sbse-bench/
 │       └── SKILL.md        # 에이전트 스킬 설정 파일
-├── engines/                # 각 검색 엔진별 플러그인 폴더
-│   └── qmd/                
-│       ├── README.md       
-│       └── search.py       # QMD 검색 연산 수행 및 stdout 출력 스크립트
-└── results/                # 엔진별 최종 벤치마크 점수 보고서 보관함
-    ├── .gitkeep
-    └── qmd_report.md       # QMD의 공식 벤치마크 결과 보고서
+└── engines/                # 평가 대상별 폴더 = 어댑터 + 그 실행 산출물(자기완결)
+    ├── README.md           # ★ 엔진 어댑터 규약(contract)
+    ├── qmd/                # (예제, 설치본 미포함) QMD 어댑터 — 리더보드 재현용
+    │   ├── README.md
+    │   ├── search.py       #   질의→stdout 검색 어댑터 (입력/고정)
+    │   ├── answers.json    #   답변 캐시 (격리 에이전트 생성)
+    │   ├── report.md       #   결과 보고서
+    │   └── report.results.json  # 채점 결과 캐시 (--from-results 재현용)
+    └── no-engine/          # (예제) 검색엔진 없이 전체 폴더를 그대로 주는 어댑터 템플릿
+        ├── README.md       #   = '무검색' 베이스라인. 점수는 답변 agent-model에 종속 → 모델별 폴더로 복사
+        └── search.py
 ```
+
+> 한 평가 대상의 **모든 것(어댑터·답변/컨텍스트 캐시·보고서·채점 캐시)이
+> `engines/<engine>/` 한 폴더**에 모입니다(자기완결). 별도 `results/` 폴더는 없습니다.
+> 엔진 어댑터(`engines/<engine>/search.py`)는 에이전트가 0단계에서 자동 생성하거나
+> 사용자가 직접 작성합니다. 설치 스크립트는
+> 어댑터를 배포하지 않으며, `engines/qmd`·`engines/no-engine` 는 작성 예시일 뿐입니다.
