@@ -46,5 +46,22 @@ class TestKeyfactCoverage(unittest.TestCase):
         self.assertEqual(facts, [])
 
 
+class TestSemanticConsistency(unittest.TestCase):
+    def test_perfect_consistency(self):
+        c = evaluator.compute_semantic_consistency({"a", "b"}, [{"a", "b"}, {"a", "b"}])
+        self.assertEqual(c, 1.0)
+
+    def test_partial_loss_averaged(self):
+        # 변형1: a,b 모두 / 변형2: a만 → (1.0 + 0.5)/2
+        c = evaluator.compute_semantic_consistency({"a", "b"}, [{"a", "b"}, {"a"}])
+        self.assertAlmostEqual(c, 0.75)
+
+    def test_empty_original_is_full(self):
+        self.assertEqual(evaluator.compute_semantic_consistency(set(), [set(), {"x"}]), 1.0)
+
+    def test_no_paraphrases_returns_none(self):
+        self.assertIsNone(evaluator.compute_semantic_consistency({"a"}, []))
+
+
 if __name__ == "__main__":
     unittest.main()

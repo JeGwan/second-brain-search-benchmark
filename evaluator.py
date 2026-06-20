@@ -188,6 +188,21 @@ def compute_keyfact_coverage(context, key_facts):
     return found_count / len(key_facts), facts
 
 
+def compute_semantic_consistency(orig_found_labels, para_found_labels_list):
+    """변형 질의가 원 질의에서 회수된 사실을 얼마나 보존하는지(0.0~1.0).
+    변형이 없으면 None."""
+    if not para_found_labels_list:
+        return None
+    orig = set(orig_found_labels)
+    scores = []
+    for para in para_found_labels_list:
+        if not orig:
+            scores.append(1.0)
+        else:
+            scores.append(len(orig & set(para)) / len(orig))
+    return sum(scores) / len(scores)
+
+
 def run_engine_search(engine, query):
     search_script = f"engines/{engine}/search.py"
     if not os.path.exists(search_script):
