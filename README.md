@@ -12,13 +12,14 @@
 second-brain-search-benchmark/
 ├── README.md               # 벤치마크 개요, 설치 및 실행 안내
 ├── evaluator.py            # 공통 평가 채점 엔진 (RAG 질의 및 에이전트 인터랙티브 중계)
-├── installer.py            # 에이전트용 스킬 자동 설치 스크립트
 ├── questions.json          # 표준 벤치마크 평가 질문지 및 채점 루브릭 (5개 문항)
 ├── second_brain/           # 표준 테스트 데이터셋 (비정형 마크다운 폴더)
 │   ├── 01_횡령의혹_내부감사보고서.md
 │   ├── 02_재무팀_비밀_장부.md
 │   ├── 03_인사기록_및_조직도.md
 │   └── 04_사내_메신저_백업.md
+├── scripts/
+│   └── install.sh          # 에이전트 환경 자동 감지 및 통합 설치 스크립트
 ├── skills/
 │   └── sbse-bench/
 │       └── SKILL.md        # 에이전트 스킬 설정 파일
@@ -35,58 +36,39 @@ second-brain-search-benchmark/
 
 ## 🚀 에이전트별 설치 및 구동 방법 (Agent Setup Guide)
 
-사용자는 로컬에 소스코드를 클론할 필요 없이, 자신이 사용하는 에이전트 환경에서 한 줄의 설치 명령어를 통해 벤치마크 스킬과 필요 데이터를 간편하게 구성할 수 있습니다.
+사용자는 로컬에 소스코드를 클론할 필요 없이, 자신이 사용하는 에이전트 환경에서 **한 줄의 설치 명령**을 통해 벤치마크 스킬과 필요 데이터를 자동으로 통합 구성할 수 있습니다.
 
-### 1. Antigravity (Gemini-based Agent)
-
-Antigravity CLI는 파일 구조 기반의 커스텀 **스킬(Skills)** 시스템을 지원합니다.
-
-*   **설치 방법**:
-    에이전트 채팅창에 직접 다음과 같이 지시하거나 터미널 쉘에 한 줄 명령을 실행합니다.
-    > "https://github.com/JeGwan/second-brain-search-benchmark 스킬을 내 로컬 워크스페이스에 설치해줘."
-    
-    *(또는 터미널 직접 실행)*
-    ```bash
-    curl -fsSL https://raw.githubusercontent.com/JeGwan/second-brain-search-benchmark/main/installer.py | python3 - --workspace-install
-    ```
-*   **실행 방법**:
-    스킬 설치가 완료되면, 채팅창에 아래와 같이 슬래시 명령어를 입력하여 실행합니다.
-    ```
-    /sbse-bench qmd
-    ```
+### 1. 통합 설치 (Common Remote Install)
+어떠한 에이전트를 사용하든 터미널 프롬프트(또는 쉘)에 다음 명령을 실행하여 설치합니다.
+```bash
+curl -fsSL https://raw.githubusercontent.com/JeGwan/second-brain-search-benchmark/main/scripts/install.sh | bash
+```
+*이 스크립트는 로컬의 Python 3 환경을 체크하고, 벤치마크에 필요한 데이터셋을 다운로드하며, 현재 활성화된 에이전트 환경(Gemini, Claude, Codex)을 감지하여 적절한 폴더에 스킬(`SKILL.md`)을 자동 설치/등록합니다.*
 
 ---
 
-### 2. Claude Code (Anthropic CLI Agent)
+### 2. 에이전트별 구동 방법 (Running the Benchmark)
 
-Claude Code는 터미널 실행에 특화되어 있으며, 쉘 명령어와의 양방향 연동이 원활합니다.
-
-*   **설치 방법**:
-    Claude Code 프롬프트에 직접 다음 명령 실행을 요청합니다.
-    ```bash
-    curl -fsSL https://raw.githubusercontent.com/JeGwan/second-brain-search-benchmark/main/installer.py | python3
+#### 🔹 Antigravity (Gemini-based Agent)
+Antigravity CLI는 파일 구조 기반의 커스텀 **스킬(Skills)** 시스템을 기본 지원합니다.
+*   **스킬 호출**: 채팅창에 아래와 같이 입력하여 실행합니다.
     ```
-*   **실행 방법**:
-    Claude Code에게 평가기를 기동하고 실시간 프롬프트 브래킷에 자동 대응하도록 요청합니다.
+    /sbse-bench qmd
+    ```
+    *또는 "sbse-bench 스킬로 qmd 벤치마크 수행해줘"라고 한글로 자유롭게 입력해도 동작합니다.*
+
+#### 🔹 Claude Code (Anthropic CLI Agent)
+Claude Code는 터미널 실행에 특화되어 있으며, 쉘 명령어와의 연동이 매우 강력합니다.
+*   **구동 방법**: Claude Code 프롬프트에 직접 아래 가이드와 명령어를 입력합니다.
     > "아래 명령어로 평가기를 구동하고, `=== SUBAGENT_PROMPT_START ===` 마커와 함께 질문이 제공되면 다른 문서를 직접 열지 말고(격리), 질문에 포함된 컨텍스트 정보만 참고하여 답변해줘."
     
     ```bash
     python3 evaluator.py --engine qmd --interactive-agent
     ```
 
----
-
-### 3. Codex (OpenAI Developer Agent Framework)
-
-Codex 및 커스텀 에이전트 프레임워크 환경에서의 연동법입니다.
-
-*   **설치 방법**:
-    Codex 터미널이나 에이전트 쉘 명령어로 인스톨러를 구동합니다.
-    ```bash
-    curl -fsSL https://raw.githubusercontent.com/JeGwan/second-brain-search-benchmark/main/installer.py | python3
-    ```
-*   **실행 방법**:
-    Claude와 동일하게, Codex가 직접 횡령 문서를 읽는 편법(치팅)을 쓰지 않도록 실행 프롬프트를 셋팅하여 기동합니다.
+#### 🔹 Codex (OpenAI Developer Agent Framework)
+Codex 및 기타 개발자용 커스텀 에이전트 프레임워크 환경입니다.
+*   **구동 방법**: Codex가 횡령 문서를 직접 읽는 치팅을 쓰지 않도록 실행 프롬프트를 지정하여 구동합니다.
     > "아래 명령어를 실행하고, `=== SUBAGENT_PROMPT` 마커가 감지되면 출력된 텍스트 범위 내에서만 100% 무맥락 격리 상태로 답변을 순차적으로 작성해서 stdin으로 입력해줘."
     
     ```bash
