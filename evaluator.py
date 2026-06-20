@@ -29,7 +29,6 @@ import os
 import re
 import sys
 import json
-import math
 import argparse
 import subprocess
 import unicodedata
@@ -207,125 +206,98 @@ def cmd_run(args):
 # 보고서 렌더링 (Task 6 에서 재작성 예정)
 # ---------------------------------------------------------------------------
 
-def generate_report(results, summary, output_path, generated_at=None):
+def generate_report(results, summary, output_path, engine, generated_at=None):
     ts = generated_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    report_md = f"""# 📊 세컨드 브레인 검색 엔진 벤치마크 결과 보고서
+    md = f"""# 📊 세컨드 브레인 검색 엔진 벤치마크 결과 보고서
 
 ## 1. 종합 요약 (Summary)
+*   **평가 대상 엔진**: {engine}
 *   **평가 일시**: {ts}
-*   **헤드라인 점수 (stability-runs 평균)**: **{summary['total_score']:.1f}** / {summary['max_score']} (달성도: **{summary['percentage']:.1f}%**)
-*   **평가 방식**: {summary['eval_method']}
-*   **답변 출처 (Answer Source)**: {summary['answer_source']}
-*   **결정론적 일관성 (Stability Runs)**: {summary['stability_runs']}회 실행
+*   **핵심사실 커버리지 (헤드라인, 마이크로 평균)**: **{summary['micro_coverage'] * 100:.1f}%** ({summary['total_found']}/{summary['total_facts']} 사실 회수)
 """
-    if summary["stability_runs"] > 1:
-        report_md += f"*   **평균 안정성 (Average Stability StdDev)**: {summary['avg_stability_std']:.3f} (낮을수록 우수)\n"
     if summary.get("avg_retrieval_recall") is not None:
-        report_md += f"*   **평균 검색 재현율 (Avg Retrieval Recall)**: {summary['avg_retrieval_recall'] * 100:.1f}% (검색 단계가 정답 근거 문서를 얼마나 가져왔는지)\n"
+        md += f"*   **평균 문서 재현율 (Avg Retrieval Recall)**: {summary['avg_retrieval_recall'] * 100:.1f}%\n"
+    if summary.get("avg_semantic_consistency") is not None:
+        md += f"*   **평균 의미론적 일관성 (Avg Semantic Consistency)**: {summary['avg_semantic_consistency'] * 100:.1f}%\n"
+    md += """
+> **측정 모델**: 검색 레이어만 결정론적으로 측정합니다. 핵심사실 커버리지는 문항별
+> 핵심 사실(key_facts)이 검색 컨텍스트에 등장했는지를 직접 매칭한 값으로, LLM 답변/채점이
+> 개입하지 않아 어떤 에이전트 환경에서 돌려도 동일한 숫자가 나옵니다.
 
-    report_md += """
-> **점수 해석 주의**: 헤드라인 점수는 반복 실행의 *평균*입니다. 표본이 작고(문항 5개)
-> 비결정성이 있으므로 소수점 차이는 노이즈로 보아야 하며, 단일 순위 비교보다는
-> 영역별 강약점과 검색 재현율을 함께 보는 것이 타당합니다.
-
-## 2. 평가 영역별 요약 (Scores by Axis)
-| 평가 영역 | 질문 수 | 획득 점수(평균) | 만점 | 백분율 |
-| :--- | :---: | :---: | :---: | :---: |
+## 2. 핵심사실 커버리지 (문항별)
+| 문항 ID | 평가 영역 | 회수 사실 | 전체 사실 | 커버리지 |
+| :---: | :--- | :---: | :---: | :---: |
 """
-    for axis, data in summary["axis_scores"].items():
-        pct = (data["score"] / data["max"]) * 100 if data["max"] > 0 else 0
-        report_md += f"| {axis} | {data['count']} | {data['score']:.1f} | {data['max']} | {pct:.1f}% |\n"
+    for r in results:
+        md += f"| {r['id']} | {r['axis']} | {r['n_found']} | {r['n_facts']} | {r['key_fact_coverage'] * 100:.0f}% |\n"
 
-    has_recall = any(r.get("retrieval_recall") is not None for r in results)
-    report_md += """
-## 3. 검색 재현율 분석 (Retrieval Recall — 검색 실패 vs 생성 실패 분리)
-정답 도출에 필요한 원본 문서(reference_notes)가 검색 단계에서 실제로 회수되었는지 측정합니다.
-재현율이 낮으면 점수 하락의 책임은 '생성/추론'이 아니라 '검색'에 있습니다.
+    md += """
+## 3. 검색 재현율 분석 (문서 단위 vs 사실 단위)
+문서 재현율은 정답 근거 문서(reference_notes)가 회수됐는지, 핵심사실 커버리지는 그 문서의
+정답 줄(청크)까지 회수됐는지를 봅니다. 재현율 100%인데 커버리지가 낮으면 '문서는 찾았으나
+청크 경계가 정답을 놓친' 경우입니다.
+| 문항 ID | 필요 문서 수 | 문서 재현율 | 핵심사실 커버리지 | 누락 문서 |
+| :---: | :---: | :---: | :---: | :--- |
 """
-    if not has_recall:
-        report_md += "\n> 이 보고서에는 검색 컨텍스트가 보존되지 않아 검색 재현율을 계산할 수 없습니다.\n"
-    else:
-        report_md += "| 문항 ID | 필요한 문서 수 | 검색 재현율 | 누락된 문서 |\n| :---: | :---: | :---: | :--- |\n"
-        for r in results:
-            if r.get("retrieval_recall") is None:
-                report_md += f"| {r['id']} | - | N/A | - |\n"
-            else:
-                missing = ", ".join(r.get("retrieval_missing") or []) or "없음"
-                report_md += f"| {r['id']} | {len(r.get('reference_notes') or [])} | {r['retrieval_recall'] * 100:.0f}% | {missing} |\n"
+    for r in results:
+        if r.get("retrieval_recall") is None:
+            md += f"| {r['id']} | - | N/A | {r['key_fact_coverage'] * 100:.0f}% | - |\n"
+        else:
+            missing = ", ".join(r.get("retrieval_missing") or []) or "없음"
+            md += f"| {r['id']} | {len(r.get('reference_notes') or [])} | {r['retrieval_recall'] * 100:.0f}% | {r['key_fact_coverage'] * 100:.0f}% | {missing} |\n"
 
-    report_md += """
-## 4. 일관성 및 신뢰성 상세 분석 (Consistency & Reliability Analysis)
-
-### 🔹 의미론적 일관성 (Semantic Robustness)
-질문 표현 변화(Paraphrasing)에 대해 RAG 시스템이 얼마나 일관된 답변을 제공하는지 평가합니다.
-**주의**: Robustness %는 '본 질문 점수와 변형 질문 점수의 일치율'(=일관성)일 뿐,
-정확성을 보장하지 않습니다. 따라서 변형 질문 '평균 점수'(정확성 대리값)를 함께 봅니다.
-| 문항 ID | 본 질문 점수 | 변형 질문 평균 점수 | 점수 일치도 (Consistency %) |
+    md += """
+## 4. 의미론적 일관성 (변형 질의 강건성)
+질문 표현이 달라져도 원 질의에서 회수한 핵심 사실을 변형 질의에서도 회수하는지 측정합니다.
+| 문항 ID | 원 질의 커버리지 | 변형 질의 평균 커버리지 | 일관성 |
 | :---: | :---: | :---: | :---: |
 """
-    has_semantic = False
     for r in results:
-        if r.get("paraphrased_results") is not None:
-            has_semantic = True
-            report_md += f"| {r['id']} | {r['score']:.1f}점 | {r['semantic_avg']:.1f}점 | {r['semantic_robustness_pct']:.1f}% |\n"
-    if not has_semantic:
-        report_md += "| - | - | - | 변형 질문이 포함된 문항이 없습니다. |\n"
+        if not r.get("paraphrased"):
+            md += f"| {r['id']} | {r['key_fact_coverage'] * 100:.0f}% | - | N/A |\n"
+            continue
+        pcovs = [p["coverage"] for p in r["paraphrased"] if p["coverage"] is not None]
+        pavg = (sum(pcovs) / len(pcovs) * 100) if pcovs else 0.0
+        cons = r["semantic_consistency"]
+        cons_s = f"{cons * 100:.0f}%" if cons is not None else "N/A"
+        md += f"| {r['id']} | {r['key_fact_coverage'] * 100:.0f}% | {pavg:.0f}% | {cons_s} |\n"
 
-    if summary["stability_runs"] > 1:
-        report_md += """
-### 🔹 결정론적 일관성 (Deterministic Stability)
-동일 질문을 반복 실행했을 때 점수의 변동성(표준편차)을 통해 검색 및 생성 안정성을 평가합니다.
-| 문항 ID | 평균 점수 | 표준편차 (StdDev) | 안정성 평가 |
-| :---: | :---: | :---: | :---: |
-"""
-        for r in results:
-            std = r["stability_std"]
-            status = "🟢 안정" if std < 0.3 else ("🟡 보통" if std < 0.7 else "🔴 불안정")
-            report_md += f"| {r['id']} | {r['stability_mean']:.2f}점 | {std:.3f} | {status} |\n"
-
-    report_md += "\n## 5. 문항별 세부 결과 (Detailed Results)\n"
+    md += "\n## 5. 문항별 세부 결과 (Detailed Results)\n"
     for r in results:
-        recall_line = ""
+        md += f"\n### 📝 {r['id']} ({r['axis']})\n"
+        md += f"*   **질문**: {r['question']}\n"
+        md += f"*   **정답 (참고용)**: {r['ground_truth']}\n"
+        md += f"*   **핵심사실 커버리지**: {r['n_found']}/{r['n_facts']} ({r['key_fact_coverage'] * 100:.0f}%)\n"
+        for f in r["key_facts"]:
+            mark = "✅" if f["found"] else "❌"
+            via = f" (매칭: `{f['matched_alias']}`)" if f["found"] else ""
+            md += f"    *   {mark} {f['label']}{via}\n"
         if r.get("retrieval_recall") is not None:
             missing = ", ".join(r.get("retrieval_missing") or []) or "없음"
-            recall_line = f"*   **검색 재현율**: {r['retrieval_recall'] * 100:.0f}% (누락: {missing})\n"
-        report_md += f"""
-### 📝 {r['id']} ({r['axis']})
-*   **질문**: {r['question']}
-*   **정답 (Ground Truth)**: {r['ground_truth']}
-{recall_line}*   **대표 답변 (run 1)**:
-    > {r['answer'].replace(chr(10), chr(10) + '> ')}
-*   **점수 (평균)**: **{r['score']:.1f}점** / 3점
-*   **대표 평가 의견**: {r['reason']}
-"""
-        if r.get("paraphrased_results"):
-            report_md += "\n*   **의미론적 일관성 변형 질문 테스트**:\n"
-            for p_idx, pr in enumerate(r["paraphrased_results"]):
-                report_md += f"    *   *변형 {p_idx + 1}*: \"{pr['q_text']}\"\n"
-                report_md += f"        *   **점수**: {pr['score']}점 / **평가의견**: {pr['reason']}\n"
-                report_md += f"        *   **답변**: {pr['answer']}\n"
-        if len(r.get("all_runs", [])) > 1:
-            report_md += "\n*   **결정론적 일관성 반복 런 테스트**:\n"
-            for run in r["all_runs"]:
-                report_md += f"    *   *런 {run['run_idx']}*: 점수 {run['score']}점 | 의견: {run['reason']}\n"
-        report_md += "\n---\n"
+            md += f"*   **문서 재현율**: {r['retrieval_recall'] * 100:.0f}% (누락: {missing})\n"
+        if r.get("paraphrased"):
+            md += "*   **변형 질의 결과**:\n"
+            for p in r["paraphrased"]:
+                pc = f"{p['coverage'] * 100:.0f}%" if p["coverage"] is not None else "N/A"
+                md += f"    *   \"{p['q_text']}\" → 커버리지 {pc}\n"
+        md += "\n---\n"
 
     parent = os.path.dirname(output_path)
     if parent and not os.path.exists(parent):
         os.makedirs(parent, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
-        f.write(report_md)
+        f.write(md)
     print(f"🎉 벤치마크 보고서가 생성되었습니다: {output_path}", file=sys.stderr)
 
 
-def dump_results_cache(results, summary, path, generated_at=None):
+def dump_results_cache(results, summary, engine, path, generated_at=None):
     payload = {
         "meta": {
+            "engine": engine,
             "generated_at": generated_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "stability_runs": summary["stability_runs"],
-            "eval_method": summary["eval_method"],
-            "answer_source": summary["answer_source"],
+            "eval_method": "결정론적 검색 측정 (핵심사실 커버리지)",
         },
+        "summary": summary,
         "results": results,
     }
     parent = os.path.dirname(path)
@@ -333,22 +305,33 @@ def dump_results_cache(results, summary, path, generated_at=None):
         os.makedirs(parent, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
-    print(f"💾 채점 결과 캐시를 저장했습니다 (재현용): {path}", file=sys.stderr)
+    print(f"💾 결과 캐시를 저장했습니다 (render 재현용): {path}", file=sys.stderr)
 
 
-# ---------------------------------------------------------------------------
-# render (채점 결과 캐시 → 보고서)
-# ---------------------------------------------------------------------------
+def print_cli_summary(summary):
+    print("\n" + "=" * 40, file=sys.stderr)
+    print("📊 벤치마크 평가 결과 요약 (결정론적 검색 측정)", file=sys.stderr)
+    print(f"- 핵심사실 커버리지(헤드라인): {summary['micro_coverage'] * 100:.1f}% "
+          f"({summary['total_found']}/{summary['total_facts']})", file=sys.stderr)
+    if summary.get("avg_retrieval_recall") is not None:
+        print(f"- 평균 문서 재현율: {summary['avg_retrieval_recall'] * 100:.1f}%", file=sys.stderr)
+    if summary.get("avg_semantic_consistency") is not None:
+        print(f"- 평균 의미론적 일관성: {summary['avg_semantic_consistency'] * 100:.1f}%", file=sys.stderr)
+    for axis, d in summary["axis_scores"].items():
+        pct = (d["found"] / d["facts"] * 100) if d["facts"] else 0.0
+        print(f"  * {axis}: {d['found']}/{d['facts']} ({pct:.1f}%)", file=sys.stderr)
+    print("=" * 40, file=sys.stderr)
+
 
 def cmd_render(args):
     with open(args.source, "r", encoding="utf-8") as f:
         payload = json.load(f)
     results = payload["results"]
     meta = payload.get("meta", {})
-    summary = summarize(results, meta.get("stability_runs", 1),
-                        meta.get("eval_method", "캐시 재현"), meta.get("answer_source", "캐시 재현"))
+    summary = payload.get("summary") or summarize(results)
+    engine = meta.get("engine", "?")
     output = args.output or os.path.join(os.path.dirname(args.source) or ".", "report.md")
-    generate_report(results, summary, output, generated_at=meta.get("generated_at"))
+    generate_report(results, summary, output, engine, generated_at=meta.get("generated_at"))
     print_cli_summary(summary)
 
 
